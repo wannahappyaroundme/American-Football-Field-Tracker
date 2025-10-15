@@ -100,7 +100,7 @@ All parameters are in `tracker_config.py`. Key settings:
 
 ```python
 ROI_TOP_PERCENT = 0.2     # Exclude top 20% (scoreboard)
-ROI_BOTTOM_PERCENT = 0.1  # Exclude bottom 10% (ads/crowd)
+ROI_BOTTOM_PERCENT = 0.2  # Exclude bottom 20% (ads/crowd)
 ```
 
 ### YOLO Detection

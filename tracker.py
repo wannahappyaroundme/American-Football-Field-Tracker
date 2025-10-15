@@ -465,6 +465,9 @@ def process_video(video_path: str, output_path: Optional[str] = None):
     frame_count = 0
     total_time = 0
     
+    last_known_tracks = np.empty((0, 5))  # 마지막 추적 결과를 저장할 변수
+    detections_for_display = 0            # 화면에 표시할 탐지 개수 저장 변수
+    
     while True:
         start_time = time.time()
         
@@ -489,23 +492,34 @@ def process_video(video_path: str, output_path: Optional[str] = None):
         masked_frame = apply_roi_mask(frame, roi_mask)
         
         # ====================================================================
-        # PART 3: YOLO DETECTION
+        # PART 3&4: YOLO DETECTION & SORT TRACKING
         # ====================================================================
         
-        # Run YOLO on masked frame
-        detections = run_yolo_detection(
-            model, 
-            masked_frame,
-            conf_threshold=config.YOLO_CONF_THRESHOLD,
-            target_classes=config.YOLO_TARGET_CLASSES
-        )
-        
-        # ====================================================================
-        # PART 4: SORT TRACKING
-        # ====================================================================
-        
-        # Update tracker with detections
-        tracks = update_tracker(tracker, detections)
+          # 프레임 스킵 로직: FRAME_SKIP 간격으로만 분석 수행
+        if frame_count % config.FRAME_SKIP == 0:
+            # --- 분석을 수행하는 프레임 ---
+            
+            # 1. YOLO 탐지 실행
+            detections = run_yolo_detection(
+                model, 
+                masked_frame,
+                conf_threshold=config.YOLO_CONF_THRESHOLD,
+                target_classes=config.YOLO_TARGET_CLASSES
+            )
+            
+            # 2. SORT 추적기 업데이트
+            tracks = update_tracker(tracker, detections)
+            
+            # 3. 다음 스킵 프레임을 위해 결과 저장
+            last_known_tracks = tracks
+            detections_for_display = len(detections)
+        else:
+            # --- 분석을 건너뛰는 프레임 ---
+
+            # 1. 탐지와 추적을 실행하지 않음
+            # 2. 이전에 저장해둔 마지막 추적 결과를 그대로 사용
+            tracks = last_known_tracks
+            detections_for_display = 0 # 탐지를 안했으므로 0으로 설정
         
         # ====================================================================
         # PART 5: VISUALIZATION

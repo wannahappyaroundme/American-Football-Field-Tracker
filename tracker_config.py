@@ -46,7 +46,7 @@ ROI_TOP_PERCENT = 0.2  # Exclude top 20%
 
 # Percentage of frame height to exclude from bottom (0.0 - 1.0)
 # This removes lower crowd, advertisements
-ROI_BOTTOM_PERCENT = 0.1  # Exclude bottom 10%
+ROI_BOTTOM_PERCENT = 0.2  # Exclude bottom 20%
 
 
 # ============================================================================
@@ -89,7 +89,7 @@ DISPLAY_MAX_WIDTH = 1600  # Set to None to disable scaling
 
 # Process every Nth frame (set to 1 to process all frames)
 # Higher values = faster processing but choppier tracking
-FRAME_SKIP = 1
+FRAME_SKIP = 10
 
 # Enable debug output
 DEBUG_MODE = True
