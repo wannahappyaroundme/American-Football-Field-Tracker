@@ -84,12 +84,27 @@ DISPLAY_MAX_WIDTH = 1600  # Set to None to disable scaling
 
 
 # ============================================================================
-# PERFORMANCE SETTINGS
+# PERFORMANCE SETTINGS - DYNAMIC FRAME PROCESSING
 # ============================================================================
 
+# DEPRECATED: Static FRAME_SKIP replaced by dynamic processing
 # Process every Nth frame (set to 1 to process all frames)
 # Higher values = faster processing but choppier tracking
-FRAME_SKIP = 10
+FRAME_SKIP = 2  # Process every 2nd frame for balance of speed and smoothness
+
+# Enable dynamic frame processing (intelligent skip based on motion)
+ENABLE_DYNAMIC_PROCESSING = False  # Disabled for speed - use static FRAME_SKIP
+
+# Frame change detection method: 'optical_flow' or 'mse'
+FRAME_CHANGE_METHOD = 'mse'  # MSE is faster, optical flow is more accurate
+
+# Threshold for frame change detection (0.0 - 1.0)
+# Lower = more sensitive (processes more frames)
+# Higher = less sensitive (skips more frames)
+FRAME_CHANGE_THRESHOLD = 0.015  # MSE threshold (normalized)
+
+# Optical flow parameters (if using 'optical_flow')
+OPTICAL_FLOW_THRESHOLD = 2.0  # Magnitude threshold for motion detection
 
 # Enable debug output
 DEBUG_MODE = True
@@ -107,6 +122,94 @@ YOLO_IMG_SIZE = 640
 # Device to run YOLO on
 # 'cpu' or 'cuda' (GPU)
 YOLO_DEVICE = 'cpu'
+
+
+# ============================================================================
+# POSE ESTIMATION SETTINGS
+# ============================================================================
+
+# Enable pose estimation for each tracked player
+ENABLE_POSE_ESTIMATION = False  # Disabled for speed - enable later if needed
+
+# Pose estimation model: 'mediapipe' or 'yolo_pose'
+POSE_MODEL = 'mediapipe'  # MediaPipe is faster and more accurate
+
+# Minimum pose detection confidence
+POSE_CONFIDENCE = 0.5
+
+# Pose estimation interval (process pose every N tracking updates)
+# Higher = faster but less frequent pose data
+POSE_ESTIMATION_INTERVAL = 1  # Process pose every frame where tracking occurs
+
+
+# ============================================================================
+# TEAM CLASSIFICATION SETTINGS
+# ============================================================================
+
+# Enable automatic team classification
+ENABLE_TEAM_CLASSIFICATION = False  # Disabled for speed - enable later if needed
+
+# Number of color clusters (teams + referees)
+NUM_TEAMS = 3  # Team A, Team B, Referees
+
+# Region of bounding box to sample for jersey color (percentage)
+# Sample from upper portion to avoid legs/field
+JERSEY_SAMPLE_TOP = 0.2    # Start at 20% from top
+JERSEY_SAMPLE_BOTTOM = 0.6  # End at 60% from top
+
+# K-Means clustering parameters
+KMEANS_INIT_FRAMES = 30  # Frames to collect before initial clustering
+KMEANS_UPDATE_INTERVAL = 60  # Re-cluster every N frames
+
+# Formation detection parameters
+CROUCH_THRESHOLD = 0.7  # Confidence threshold for crouching pose
+LINE_OF_SCRIMMAGE_TOLERANCE = 5  # Pixels tolerance for line detection
+
+
+# ============================================================================
+# HOMOGRAPHY & BIRD'S EYE VIEW SETTINGS
+# ============================================================================
+
+# Enable homography-based bird's eye view
+ENABLE_BIRDS_EYE_VIEW = False  # Disabled for speed - enable later if needed
+
+# Field dimensions (in yards)
+FIELD_LENGTH = 120  # Including end zones
+FIELD_WIDTH = 53.33  # Standard width
+
+# Bird's eye view output dimensions (pixels)
+BIRDS_EYE_WIDTH = 400
+BIRDS_EYE_HEIGHT = 600
+
+# Field line detection parameters
+FIELD_LINE_DETECTION_INTERVAL = 30  # Recalculate homography every N frames
+USE_CACHED_HOMOGRAPHY = True  # Use previous homography if line detection fails
+
+# Minimum confidence for field line detection
+MIN_FIELD_LINES = 4  # Minimum lines needed for homography
+
+# Player visualization on bird's eye view
+PLAYER_DOT_RADIUS = 5
+TEAM_A_COLOR = (0, 0, 255)    # Red (BGR)
+TEAM_B_COLOR = (255, 0, 0)    # Blue (BGR)
+REFEREE_COLOR = (255, 255, 255)  # White (BGR)
+
+
+# ============================================================================
+# DEEPSO RT / STRONGSORT SETTINGS
+# ============================================================================
+
+# Use DeepSORT instead of basic SORT
+USE_DEEPSORT = False  # Disabled for speed - SORT is faster
+
+# DeepSORT max age (frames to keep track alive)
+DEEPSORT_MAX_AGE = 30  # Much higher than SORT
+
+# DeepSORT appearance feature weight
+DEEPSORT_MAX_IOU_DISTANCE = 0.7
+
+# DeepSORT embedding distance threshold
+DEEPSORT_MAX_COSINE_DISTANCE = 0.3
 
 
 # ============================================================================

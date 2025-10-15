@@ -1,28 +1,72 @@
 """
-Football Player and Ball Tracker
-=================================
+Football Tactical Analysis Engine
+==================================
 
-Real-time player and ball tracking system using YOLOv8 for detection
-and SORT algorithm for multi-object tracking.
+Advanced real-time player tracking and tactical analysis system.
 
-This system:
-1. Uses ROI masking to focus on the main play area
-2. Detects players (person) and football (sports ball) using YOLOv8
-3. Tracks detected objects across frames using SORT
-4. Maintains unique IDs for each tracked object
-5. Visualizes tracking results with bounding boxes and IDs
+Features:
+1. Dynamic frame processing for 1x playback speed
+2. YOLOv8 detection + DeepSORT tracking for robust ID persistence
+3. Integrated pose estimation for player posture analysis
+4. Intelligent team classification based on jersey color and formation
+5. Homography-based bird's eye view for tactical visualization
+
+Upgrades from v1:
+- SORT → DeepSORT (appearance-based tracking)
+- Static FRAME_SKIP → Dynamic motion detection
+- Added pose estimation (MediaPipe)
+- Added team classification (K-means + formation analysis)
+- Added bird's eye view (homography transformation)
 
 Author: Computer Vision Engineer
 Date: October 2025
+Version: 2.0 - Tactical Analysis Engine
 """
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from sort import Sort
 import time
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
 import tracker_config as config
+
+# Advanced tracking imports
+try:
+    from deep_sort_realtime.deepsort_tracker import DeepSort
+    DEEPSORT_AVAILABLE = True
+except ImportError:
+    from sort import Sort
+    DEEPSORT_AVAILABLE = False
+    print("Warning: DeepSORT not available, falling back to SORT")
+
+# New module imports (with error handling for optional features)
+try:
+    from frame_analyzer import AdaptiveFrameProcessor
+    FRAME_ANALYZER_AVAILABLE = True
+except ImportError:
+    FRAME_ANALYZER_AVAILABLE = False
+    print("Warning: frame_analyzer not available, dynamic processing disabled")
+
+try:
+    from pose_estimator import PoseEstimator
+    POSE_ESTIMATOR_AVAILABLE = True
+except ImportError:
+    POSE_ESTIMATOR_AVAILABLE = False
+    print("Warning: pose_estimator not available, pose estimation disabled")
+
+try:
+    from team_classifier import TeamClassifier
+    TEAM_CLASSIFIER_AVAILABLE = True
+except ImportError:
+    TEAM_CLASSIFIER_AVAILABLE = False
+    print("Warning: team_classifier not available, team classification disabled")
+
+try:
+    from field_homography import FieldLineDetector, HomographyCalculator, BirdsEyeView
+    FIELD_HOMOGRAPHY_AVAILABLE = True
+except ImportError:
+    FIELD_HOMOGRAPHY_AVAILABLE = False
+    print("Warning: field_homography not available, bird's eye view disabled")
 
 
 # ============================================================================
@@ -45,22 +89,121 @@ def load_yolo_model(model_path: str = 'yolov8n.pt'):
     return model
 
 
-def initialize_tracker(max_age: int = 1, min_hits: int = 3, iou_threshold: float = 0.3):
+def initialize_tracker(use_deepsort: bool = True):
     """
-    Initialize SORT tracker.
+    Initialize tracker (DeepSORT or SORT fallback).
     
     Args:
-        max_age: Maximum frames to keep alive a track without detections
-        min_hits: Minimum detections before track is confirmed
-        iou_threshold: Minimum IoU for match
+        use_deepsort: Use DeepSORT if available
         
     Returns:
-        SORT tracker instance
+        Tracker instance
     """
-    print(f"Initializing SORT tracker...")
-    print(f"  max_age={max_age}, min_hits={min_hits}, iou_threshold={iou_threshold}")
-    tracker = Sort(max_age=max_age, min_hits=min_hits, iou_threshold=iou_threshold)
-    return tracker
+    if use_deepsort and DEEPSORT_AVAILABLE:
+        print(f"Initializing DeepSORT tracker...")
+        print(f"  max_age={config.DEEPSORT_MAX_AGE}")
+        print(f"  max_iou_distance={config.DEEPSORT_MAX_IOU_DISTANCE}")
+        print(f"  max_cosine_distance={config.DEEPSORT_MAX_COSINE_DISTANCE}")
+        
+        tracker = DeepSort(
+            max_age=config.DEEPSORT_MAX_AGE,
+            n_init=config.SORT_MIN_HITS,
+            max_iou_distance=config.DEEPSORT_MAX_IOU_DISTANCE,
+            max_cosine_distance=config.DEEPSORT_MAX_COSINE_DISTANCE,
+            embedder="mobilenet",
+            half=True,
+            today=None
+        )
+        return tracker, 'deepsort'
+    else:
+        print(f"Initializing SORT tracker (fallback)...")
+        print(f"  max_age={config.SORT_MAX_AGE}, min_hits={config.SORT_MIN_HITS}")
+        from sort import Sort
+        tracker = Sort(
+            max_age=config.SORT_MAX_AGE,
+            min_hits=config.SORT_MIN_HITS,
+            iou_threshold=config.SORT_IOU_THRESHOLD
+        )
+        return tracker, 'sort'
+
+
+def initialize_advanced_modules():
+    """
+    Initialize advanced analysis modules.
+    
+    Returns:
+        Dictionary of initialized modules
+    """
+    modules = {}
+    
+    # Dynamic frame processor
+    if config.ENABLE_DYNAMIC_PROCESSING and FRAME_ANALYZER_AVAILABLE:
+        print("Initializing dynamic frame processor...")
+        modules['frame_processor'] = AdaptiveFrameProcessor(
+            enable_dynamic=True,
+            method=config.FRAME_CHANGE_METHOD,
+            threshold=config.FRAME_CHANGE_THRESHOLD,
+            min_process_interval=1,
+            max_skip_frames=10
+        )
+    else:
+        if config.ENABLE_DYNAMIC_PROCESSING and not FRAME_ANALYZER_AVAILABLE:
+            print("  Skipped (module not available)")
+        modules['frame_processor'] = None
+    
+    # Pose estimator
+    if config.ENABLE_POSE_ESTIMATION and POSE_ESTIMATOR_AVAILABLE:
+        print("Initializing pose estimator...")
+        modules['pose_estimator'] = PoseEstimator(
+            model=config.POSE_MODEL,
+            confidence=config.POSE_CONFIDENCE
+        )
+    else:
+        if config.ENABLE_POSE_ESTIMATION and not POSE_ESTIMATOR_AVAILABLE:
+            print("  Skipped (module not available)")
+        modules['pose_estimator'] = None
+    
+    # Team classifier
+    if config.ENABLE_TEAM_CLASSIFICATION and TEAM_CLASSIFIER_AVAILABLE:
+        print("Initializing team classifier...")
+        modules['team_classifier'] = TeamClassifier(
+            num_teams=config.NUM_TEAMS,
+            jersey_sample_top=config.JERSEY_SAMPLE_TOP,
+            jersey_sample_bottom=config.JERSEY_SAMPLE_BOTTOM,
+            init_frames=config.KMEANS_INIT_FRAMES,
+            update_interval=config.KMEANS_UPDATE_INTERVAL,
+            crouch_threshold=config.CROUCH_THRESHOLD,
+            los_tolerance=config.LINE_OF_SCRIMMAGE_TOLERANCE
+        )
+    else:
+        if config.ENABLE_TEAM_CLASSIFICATION and not TEAM_CLASSIFIER_AVAILABLE:
+            print("  Skipped (module not available)")
+        modules['team_classifier'] = None
+    
+    # Field line detector
+    if config.ENABLE_BIRDS_EYE_VIEW and FIELD_HOMOGRAPHY_AVAILABLE:
+        print("Initializing bird's eye view system...")
+        modules['field_detector'] = FieldLineDetector()
+        modules['homography_calc'] = HomographyCalculator(
+            field_length=config.FIELD_LENGTH,
+            field_width=config.FIELD_WIDTH,
+            output_width=config.BIRDS_EYE_WIDTH,
+            output_height=config.BIRDS_EYE_HEIGHT
+        )
+        modules['birds_eye_view'] = BirdsEyeView(
+            width=config.BIRDS_EYE_WIDTH,
+            height=config.BIRDS_EYE_HEIGHT,
+            field_length=config.FIELD_LENGTH,
+            field_width=config.FIELD_WIDTH
+        )
+    else:
+        if config.ENABLE_BIRDS_EYE_VIEW and not FIELD_HOMOGRAPHY_AVAILABLE:
+            print("  Skipped (module not available)")
+        modules['field_detector'] = None
+        modules['homography_calc'] = None
+        modules['birds_eye_view'] = None
+    
+    return modules
 
 
 # ============================================================================
@@ -227,21 +370,47 @@ def separate_detections(detections: np.ndarray, model) -> Tuple[np.ndarray, np.n
 # PART 4: SORT TRACKING
 # ============================================================================
 
-def update_tracker(tracker: Sort, detections: np.ndarray) -> np.ndarray:
+def update_tracker(tracker, detections: np.ndarray, tracker_type: str = 'sort', frame: np.ndarray = None) -> np.ndarray:
     """
-    Update SORT tracker with new detections.
+    Update tracker with new detections (supports both SORT and DeepSORT).
     
     Args:
-        tracker: SORT tracker instance
+        tracker: Tracker instance (SORT or DeepSORT)
         detections: Array of shape (N, 5) with format [x1, y1, x2, y2, score]
+        tracker_type: Type of tracker ('sort' or 'deepsort')
+        frame: Original frame (required for DeepSORT)
         
     Returns:
         tracks: Array of shape (M, 5) with format [x1, y1, x2, y2, track_id]
     """
-    # Update tracker
-    tracks = tracker.update(detections)
+    if tracker_type == 'deepsort':
+        # DeepSORT requires different format
+        if len(detections) == 0:
+            tracks = tracker.update_tracks([], frame=frame)
+        else:
+            # Convert detections to DeepSORT format: [[bbox, confidence, class], ...]
+            dets_deepsort = []
+            for det in detections:
+                x1, y1, x2, y2, score = det
+                bbox = [x1, y1, x2 - x1, y2 - y1]  # Convert to [x, y, w, h]
+                dets_deepsort.append((bbox, score, 0))  # class=0 (person)
+            
+            tracks = tracker.update_tracks(dets_deepsort, frame=frame)
+        
+        # Convert DeepSORT tracks to standard format
+        tracks_array = []
+        for track in tracks:
+            if not track.is_confirmed():
+                continue
+            
+            bbox = track.to_ltrb()  # Get [left, top, right, bottom]
+            track_id = track.track_id
+            tracks_array.append([bbox[0], bbox[1], bbox[2], bbox[3], track_id])
+        
+        return np.array(tracks_array) if tracks_array else np.empty((0, 5))
     
-    return tracks
+    else:  # SORT
+        return tracker.update(detections)
 
 
 # ============================================================================
@@ -301,10 +470,18 @@ def draw_tracks(frame: np.ndarray,
     """
     vis = frame.copy()
     
+    if len(tracks) == 0:
+        return vis
+    
     for track in tracks:
-        x1, y1, x2, y2, track_id = track
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        track_id = int(track_id)
+        try:
+            x1, y1, x2, y2, track_id = track
+            # Safely convert to int (handle both float and string)
+            x1, y1, x2, y2 = int(float(x1)), int(float(y1)), int(float(x2)), int(float(y2))
+            track_id = int(float(track_id))
+        except (ValueError, TypeError) as e:
+            # Skip invalid tracks
+            continue
         
         # Draw bounding box
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
@@ -330,6 +507,48 @@ def draw_tracks(frame: np.ndarray,
         cv2.circle(vis, (center_x, center_y), 4, color, -1)
     
     return vis
+
+
+def create_display_simple(tracked_frame: np.ndarray,
+                         num_detections: int,
+                         num_tracks: int,
+                         fps: float,
+                         frame_count: int) -> np.ndarray:
+    """
+    Create simple, fast display with just tracked frame and stats.
+    
+    Args:
+        tracked_frame: Frame with tracks drawn
+        num_detections: Number of detections
+        num_tracks: Number of active tracks  
+        fps: Current FPS
+        frame_count: Current frame number
+        
+    Returns:
+        Display frame with stats overlay
+    """
+    display = tracked_frame.copy()
+    
+    # Add stats overlay
+    stats_y = 30
+    stats = [
+        f"Frame: {frame_count}",
+        f"FPS: {fps:.1f}",
+        f"Detections: {num_detections}",
+        f"Active Tracks: {num_tracks}",
+        f"Press 'q' to quit, 'p' to pause"
+    ]
+    
+    for stat in stats:
+        # Background
+        (w, h), _ = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.rectangle(display, (5, stats_y - 20), (w + 15, stats_y + 5), (0, 0, 0), -1)
+        # Text
+        cv2.putText(display, stat, (10, stats_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        stats_y += 30
+    
+    return display
 
 
 def create_display(frame: np.ndarray, 
@@ -442,11 +661,13 @@ def process_video(video_path: str, output_path: Optional[str] = None):
     print("="*60)
     
     model = load_yolo_model(config.YOLO_MODEL_PATH)
-    tracker = initialize_tracker(
-        max_age=config.SORT_MAX_AGE,
-        min_hits=config.SORT_MIN_HITS,
-        iou_threshold=config.SORT_IOU_THRESHOLD
-    )
+    tracker, tracker_type = initialize_tracker(use_deepsort=config.USE_DEEPSORT)
+    
+    # Initialize advanced modules
+    print("\n" + "="*60)
+    print("Initializing Advanced Modules...")
+    print("="*60)
+    modules = initialize_advanced_modules()
     
     # Initialize video writer if output path specified
     writer = None
@@ -495,32 +716,26 @@ def process_video(video_path: str, output_path: Optional[str] = None):
         # PART 3&4: YOLO DETECTION & SORT TRACKING
         # ====================================================================
         
-          # 프레임 스킵 로직: FRAME_SKIP 간격으로만 분석 수행
+        # 프레임 스킵 로직: FRAME_SKIP 간격으로만 분석 수행
+        # tracker.py의 while 루프 안
         if frame_count % config.FRAME_SKIP == 0:
-            # --- 분석을 수행하는 프레임 ---
-            
-            # 1. YOLO 탐지 실행
+        # --- 분석을 수행하는 프레임 ---
             detections = run_yolo_detection(
-                model, 
+                model,
                 masked_frame,
                 conf_threshold=config.YOLO_CONF_THRESHOLD,
                 target_classes=config.YOLO_TARGET_CLASSES
             )
-            
-            # 2. SORT 추적기 업데이트
-            tracks = update_tracker(tracker, detections)
-            
-            # 3. 다음 스킵 프레임을 위해 결과 저장
+            tracks = update_tracker(tracker, detections, tracker_type=tracker_type, frame=frame)
+
+            # 결과를 다음 프레임들을 위해 저장
             last_known_tracks = tracks
-            detections_for_display = len(detections)
+            detections_for_display = len(detections) # 실제 탐지된 개수를 저장
         else:
             # --- 분석을 건너뛰는 프레임 ---
-
-            # 1. 탐지와 추적을 실행하지 않음
-            # 2. 이전에 저장해둔 마지막 추적 결과를 그대로 사용
             tracks = last_known_tracks
             detections_for_display = 0 # 탐지를 안했으므로 0으로 설정
-        
+            
         # ====================================================================
         # PART 5: VISUALIZATION
         # ====================================================================
@@ -536,30 +751,27 @@ def process_video(video_path: str, output_path: Optional[str] = None):
         current_fps = 1.0 / elapsed if elapsed > 0 else 0
         avg_fps = frame_count / total_time if total_time > 0 else 0
         
-        # Create display
-        display = create_display(frame, masked_frame, tracked_frame, roi_mask,
-                                len(detections), len(tracks), avg_fps)
+        # Create simple, fast display (single panel instead of 2x2 grid)
+        display = create_display_simple(tracked_frame, detections_for_display, 
+                                       len(tracks), avg_fps, frame_count)
         
-        # Resize for display if needed
-        if config.DISPLAY_MAX_WIDTH and display.shape[1] > config.DISPLAY_MAX_WIDTH:
-            scale = config.DISPLAY_MAX_WIDTH / display.shape[1]
-            new_width = int(display.shape[1] * scale)
-            new_height = int(display.shape[0] * scale)
-            display_resized = cv2.resize(display, (new_width, new_height))
-        else:
-            display_resized = display
+        # Resize for speed (smaller window = faster rendering)
+        if display.shape[1] > 1280:
+            scale = 1280 / display.shape[1]
+            w = int(display.shape[1] * scale)
+            h = int(display.shape[0] * scale)
+            display = cv2.resize(display, (w, h))
         
-        # Show frame
-        cv2.imshow('Football Tracker - YOLO + SORT', display_resized)
+        cv2.imshow('Football Tracker - Real-Time', display)
         
         # Write to output if specified
         if writer:
             writer.write(display)
         
-        # Print progress
+        # Print progress (less frequently)
         if frame_count % 30 == 0:
             print(f"Frame {frame_count}/{frame_count_total} | "
-                  f"Detections: {len(detections)} | "
+                  f"Detections: {detections_for_display} | "
                   f"Tracks: {len(tracks)} | "
                   f"FPS: {avg_fps:.1f}")
         
@@ -567,6 +779,7 @@ def process_video(video_path: str, output_path: Optional[str] = None):
         # USER CONTROLS
         # ====================================================================
         
+        # Non-blocking key check for real-time playback
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             print("\nUser requested quit.")
