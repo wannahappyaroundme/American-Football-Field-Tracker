@@ -68,6 +68,20 @@ except ImportError:
     FIELD_HOMOGRAPHY_AVAILABLE = False
     print("Warning: field_homography not available, bird's eye view disabled")
 
+try:
+    from ball_carrier_detector import BallCarrierDetector
+    BALL_CARRIER_AVAILABLE = True
+except ImportError:
+    BALL_CARRIER_AVAILABLE = False
+    print("Warning: ball_carrier_detector not available, ball carrier detection disabled")
+
+try:
+    from distance_tracker import DistanceTracker
+    DISTANCE_TRACKER_AVAILABLE = True
+except ImportError:
+    DISTANCE_TRACKER_AVAILABLE = False
+    print("Warning: distance_tracker not available, distance tracking disabled")
+
 
 # ============================================================================
 # PART 1: MODEL INITIALIZATION AND SETUP

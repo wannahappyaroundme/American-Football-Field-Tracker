@@ -13,6 +13,10 @@ VIDEO_INPUT_PATH = "zoomed_game.mp4"
 # Path to save output video (set to None to disable saving)
 VIDEO_OUTPUT_PATH = "tracked_output.mp4"  # Or None
 
+# Output video FPS multiplier (for accelerated playback)
+# 1.0 = same speed, 2.0 = 2x speed, 0.5 = half speed
+OUTPUT_FPS_MULTIPLIER = 2.0  # Save at 2x speed for quick review
+
 
 # ============================================================================
 # YOLO DETECTION SETTINGS
@@ -90,7 +94,8 @@ DISPLAY_MAX_WIDTH = 1600  # Set to None to disable scaling
 # DEPRECATED: Static FRAME_SKIP replaced by dynamic processing
 # Process every Nth frame (set to 1 to process all frames)
 # Higher values = faster processing but choppier tracking
-FRAME_SKIP = 2  # Process every 2nd frame for balance of speed and smoothness
+# ANALYTICS MODE: Process every frame for maximum accuracy
+FRAME_SKIP = 1  # Process ALL frames - accuracy over speed
 
 # Enable dynamic frame processing (intelligent skip based on motion)
 ENABLE_DYNAMIC_PROCESSING = False  # Disabled for speed - use static FRAME_SKIP
@@ -170,12 +175,12 @@ LINE_OF_SCRIMMAGE_TOLERANCE = 5  # Pixels tolerance for line detection
 # HOMOGRAPHY & BIRD'S EYE VIEW SETTINGS
 # ============================================================================
 
-# Enable homography-based bird's eye view
-ENABLE_BIRDS_EYE_VIEW = False  # Disabled for speed - enable later if needed
+# Enable homography-based bird's eye view with analytics
+ENABLE_BIRDS_EYE_VIEW = True  # Enable for tactical visualization
 
 # Field dimensions (in yards)
 FIELD_LENGTH = 120  # Including end zones
-FIELD_WIDTH = 53.33  # Standard width
+FIELD_WIDTH = 53.33  # Standard width (160 feet)
 
 # Bird's eye view output dimensions (pixels)
 BIRDS_EYE_WIDTH = 400
@@ -189,27 +194,60 @@ USE_CACHED_HOMOGRAPHY = True  # Use previous homography if line detection fails
 MIN_FIELD_LINES = 4  # Minimum lines needed for homography
 
 # Player visualization on bird's eye view
-PLAYER_DOT_RADIUS = 5
+PLAYER_DOT_RADIUS = 6
 TEAM_A_COLOR = (0, 0, 255)    # Red (BGR)
 TEAM_B_COLOR = (255, 0, 0)    # Blue (BGR)
 REFEREE_COLOR = (255, 255, 255)  # White (BGR)
 
+# Distance tracking settings
+ENABLE_DISTANCE_TRACKING = True  # Calculate player travel distance
+DISTANCE_DISPLAY_FORMAT = "{:.1f}yd"  # Display format for distance
+
+# Calibration: Pixels per yard on bird's eye view
+# Calculated as: BIRDS_EYE_HEIGHT / FIELD_LENGTH
+PIXELS_PER_YARD = BIRDS_EYE_HEIGHT / FIELD_LENGTH  # Auto-calculated
+
+# Distance tracking visualization
+SHOW_DISTANCE_ON_MAIN_VIEW = True  # Display distance next to player boxes
+SHOW_DISTANCE_ON_BIRDS_EYE = True  # Display distance on tactical map
+
 
 # ============================================================================
-# DEEPSO RT / STRONGSORT SETTINGS
+# ADVANCED TRACKING SETTINGS (BoT-SORT / StrongSORT / DeepSORT)
 # ============================================================================
 
-# Use DeepSORT instead of basic SORT
-USE_DEEPSORT = False  # Disabled for speed - SORT is faster
+# Use advanced tracker with Re-ID (Re-identification)
+USE_DEEPSORT = True  # Enable for absolute tracking persistence
 
-# DeepSORT max age (frames to keep track alive)
-DEEPSORT_MAX_AGE = 30  # Much higher than SORT
+# Tracker max age (frames to keep track alive without detection)
+# High value = handles long occlusions (pileups, off-screen)
+DEEPSORT_MAX_AGE = 60  # Doubled for football occlusions
 
 # DeepSORT appearance feature weight
 DEEPSORT_MAX_IOU_DISTANCE = 0.7
 
-# DeepSORT embedding distance threshold
-DEEPSORT_MAX_COSINE_DISTANCE = 0.3
+# DeepSORT embedding distance threshold (lower = stricter matching)
+DEEPSORT_MAX_COSINE_DISTANCE = 0.2  # Stricter for zero ID switches
+
+# Number of consecutive detections before track is confirmed
+DEEPSORT_N_INIT = 3  # Balanced confirmation
+
+
+# ============================================================================
+# BALL CARRIER IDENTIFICATION
+# ============================================================================
+
+# Enable ball carrier detection
+ENABLE_BALL_CARRIER_DETECTION = True
+
+# Maximum distance (pixels) between player and ball to be considered carrier
+BALL_CARRIER_MAX_DISTANCE = 80  # Adjust based on video resolution
+
+# Ball carrier visualization color (BGR)
+BALL_CARRIER_COLOR = (0, 255, 255)  # Bright yellow
+
+# Confidence threshold for ball detection (higher = more certain)
+BALL_DETECTION_CONFIDENCE = 0.3  # Lower for small ball detection
 
 
 # ============================================================================
