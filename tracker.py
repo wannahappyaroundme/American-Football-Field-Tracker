@@ -1,829 +1,570 @@
 """
-Football Tactical Analysis Engine
-==================================
+Football Video Analysis Tool
+=============================
 
-Advanced real-time player tracking and tactical analysis system.
+Offline video analysis system for American football that combines:
+1. YOLOv8 object detection for accurate player separation
+2. Team classification via jersey color clustering (K-Means)
+3. Static homography transformation for tactical top-down view
+4. Side-by-side visualization (original + tactical map)
 
-Features:
-1. Dynamic frame processing for 1x playback speed
-2. YOLOv8 detection + DeepSORT tracking for robust ID persistence
-3. Integrated pose estimation for player posture analysis
-4. Intelligent team classification based on jersey color and formation
-5. Homography-based bird's eye view for tactical visualization
-
-Upgrades from v1:
-- SORT → DeepSORT (appearance-based tracking)
-- Static FRAME_SKIP → Dynamic motion detection
-- Added pose estimation (MediaPipe)
-- Added team classification (K-means + formation analysis)
-- Added bird's eye view (homography transformation)
+Priority: Accuracy and detailed analysis over speed.
+Output: Processed MP4 video file with complete annotations.
 
 Author: Computer Vision Engineer
 Date: October 2025
-Version: 2.0 - Tactical Analysis Engine
+Version: 2.0 - Clean Consolidated System
 """
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
-import time
+from sklearn.cluster import KMeans
+import math
 from typing import Tuple, List, Optional, Dict
-import tracker_config as config
 
-# Advanced tracking imports
-try:
-    from deep_sort_realtime.deepsort_tracker import DeepSort
-    DEEPSORT_AVAILABLE = True
-except ImportError:
-    from sort import Sort
-    DEEPSORT_AVAILABLE = False
-    print("Warning: DeepSORT not available, falling back to SORT")
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-# New module imports (with error handling for optional features)
-try:
-    from frame_analyzer import AdaptiveFrameProcessor
-    FRAME_ANALYZER_AVAILABLE = True
-except ImportError:
-    FRAME_ANALYZER_AVAILABLE = False
-    print("Warning: frame_analyzer not available, dynamic processing disabled")
+# Video paths
+INPUT_VIDEO = "zoomed_game.mp4"
+OUTPUT_VIDEO = "output_analysis.mp4"
 
-try:
-    from pose_estimator import PoseEstimator
-    POSE_ESTIMATOR_AVAILABLE = True
-except ImportError:
-    POSE_ESTIMATOR_AVAILABLE = False
-    print("Warning: pose_estimator not available, pose estimation disabled")
+# YOLO settings
+YOLO_MODEL = "yolov8n.pt"
+YOLO_CONFIDENCE = 0.5
 
-try:
-    from team_classifier import TeamClassifier
-    TEAM_CLASSIFIER_AVAILABLE = True
-except ImportError:
-    TEAM_CLASSIFIER_AVAILABLE = False
-    print("Warning: team_classifier not available, team classification disabled")
+# Team classification - HSV color ranges (Hue, Saturation, Value)
+# Adjust these ranges based on your team's jersey colors
+TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Example: Blue jerseys
+TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))      # Example: White jerseys
+REFEREE_HSV_RANGE = ((0, 0, 0), (180, 255, 60))       # Example: Black jerseys
 
-try:
-    from field_homography import FieldLineDetector, HomographyCalculator, BirdsEyeView
-    FIELD_HOMOGRAPHY_AVAILABLE = True
-except ImportError:
-    FIELD_HOMOGRAPHY_AVAILABLE = False
-    print("Warning: field_homography not available, bird's eye view disabled")
+# Team visualization colors (BGR)
+TEAM_A_COLOR = (255, 0, 0)      # Blue
+TEAM_B_COLOR = (0, 0, 255)      # Red
+REFEREE_COLOR = (0, 255, 255)   # Yellow
+UNKNOWN_COLOR = (128, 128, 128) # Gray
 
-try:
-    from ball_carrier_detector import BallCarrierDetector
-    BALL_CARRIER_AVAILABLE = True
-except ImportError:
-    BALL_CARRIER_AVAILABLE = False
-    print("Warning: ball_carrier_detector not available, ball carrier detection disabled")
-
-try:
-    from distance_tracker import DistanceTracker
-    DISTANCE_TRACKER_AVAILABLE = True
-except ImportError:
-    DISTANCE_TRACKER_AVAILABLE = False
-    print("Warning: distance_tracker not available, distance tracking disabled")
+# Top-down view settings
+FIELD_WIDTH = 400    # Pixels
+FIELD_HEIGHT = 600   # Pixels
+FIELD_LENGTH_YARDS = 120  # Including end zones
+FIELD_WIDTH_YARDS = 53.33
 
 
 # ============================================================================
-# PART 1: MODEL INITIALIZATION AND SETUP
+# PART 1: STATIC HOMOGRAPHY CALCULATION
 # ============================================================================
 
-def load_yolo_model(model_path: str = 'yolov8n.pt'):
+def detect_field_lines(frame: np.ndarray) -> Tuple[List, List]:
     """
-    Load pre-trained YOLOv8 model.
+    Detect horizontal and vertical field lines using Hough Transform.
     
     Args:
-        model_path: Path to YOLO model weights
+        frame: Input video frame
         
     Returns:
-        YOLO model instance
+        Tuple of (horizontal_lines, vertical_lines)
     """
-    print(f"Loading YOLOv8 model: {model_path}")
-    model = YOLO(model_path)
-    print("Model loaded successfully!")
-    return model
+    print("  Detecting field lines...")
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Enhance white lines using top-hat morphology
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+    enhanced = cv2.add(gray, tophat)
+    
+    # Apply Gaussian blur
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.5)
+    
+    # Canny edge detection
+    edges = cv2.Canny(blurred, 50, 150)
+    
+    # Hough Line Transform
+    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=100,
+                           minLineLength=100, maxLineGap=20)
+    
+    if lines is None:
+        return [], []
+    
+    # Classify lines
+    horizontal_lines = []
+    vertical_lines = []
+    
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = abs(math.atan2(y2 - y1, x2 - x1) * 180 / math.pi)
+        
+        if angle < 15 or angle > 165:
+            horizontal_lines.append((x1, y1, x2, y2))
+        elif 75 < angle < 105:
+            vertical_lines.append((x1, y1, x2, y2))
+    
+    print(f"  Found {len(horizontal_lines)} horizontal, {len(vertical_lines)} vertical lines")
+    
+    return horizontal_lines, vertical_lines
 
 
-def initialize_tracker(use_deepsort: bool = True):
+def find_line_intersections(h_lines: List, v_lines: List) -> List[Tuple[float, float]]:
     """
-    Initialize tracker (DeepSORT or SORT fallback).
+    Find intersection points between horizontal and vertical lines.
     
     Args:
-        use_deepsort: Use DeepSORT if available
+        h_lines: List of horizontal lines
+        v_lines: List of vertical lines
         
     Returns:
-        Tracker instance
+        List of intersection points (x, y)
     """
-    if use_deepsort and DEEPSORT_AVAILABLE:
-        print(f"Initializing DeepSORT tracker...")
-        print(f"  max_age={config.DEEPSORT_MAX_AGE}")
-        print(f"  max_iou_distance={config.DEEPSORT_MAX_IOU_DISTANCE}")
-        print(f"  max_cosine_distance={config.DEEPSORT_MAX_COSINE_DISTANCE}")
-        
-        tracker = DeepSort(
-            max_age=config.DEEPSORT_MAX_AGE,
-            n_init=config.SORT_MIN_HITS,
-            max_iou_distance=config.DEEPSORT_MAX_IOU_DISTANCE,
-            max_cosine_distance=config.DEEPSORT_MAX_COSINE_DISTANCE,
-            embedder="mobilenet",
-            half=True,
-            today=None
-        )
-        return tracker, 'deepsort'
-    else:
-        print(f"Initializing SORT tracker (fallback)...")
-        print(f"  max_age={config.SORT_MAX_AGE}, min_hits={config.SORT_MIN_HITS}")
-        from sort import Sort
-        tracker = Sort(
-            max_age=config.SORT_MAX_AGE,
-            min_hits=config.SORT_MIN_HITS,
-            iou_threshold=config.SORT_IOU_THRESHOLD
-        )
-        return tracker, 'sort'
-
-
-def initialize_advanced_modules():
-    """
-    Initialize advanced analysis modules.
+    intersections = []
     
-    Returns:
-        Dictionary of initialized modules
-    """
-    modules = {}
-    
-    # Dynamic frame processor
-    if config.ENABLE_DYNAMIC_PROCESSING and FRAME_ANALYZER_AVAILABLE:
-        print("Initializing dynamic frame processor...")
-        modules['frame_processor'] = AdaptiveFrameProcessor(
-            enable_dynamic=True,
-            method=config.FRAME_CHANGE_METHOD,
-            threshold=config.FRAME_CHANGE_THRESHOLD,
-            min_process_interval=1,
-            max_skip_frames=10
-        )
-    else:
-        if config.ENABLE_DYNAMIC_PROCESSING and not FRAME_ANALYZER_AVAILABLE:
-            print("  Skipped (module not available)")
-        modules['frame_processor'] = None
-    
-    # Pose estimator
-    if config.ENABLE_POSE_ESTIMATION and POSE_ESTIMATOR_AVAILABLE:
-        print("Initializing pose estimator...")
-        modules['pose_estimator'] = PoseEstimator(
-            model=config.POSE_MODEL,
-            confidence=config.POSE_CONFIDENCE
-        )
-    else:
-        if config.ENABLE_POSE_ESTIMATION and not POSE_ESTIMATOR_AVAILABLE:
-            print("  Skipped (module not available)")
-        modules['pose_estimator'] = None
-    
-    # Team classifier
-    if config.ENABLE_TEAM_CLASSIFICATION and TEAM_CLASSIFIER_AVAILABLE:
-        print("Initializing team classifier...")
-        modules['team_classifier'] = TeamClassifier(
-            num_teams=config.NUM_TEAMS,
-            jersey_sample_top=config.JERSEY_SAMPLE_TOP,
-            jersey_sample_bottom=config.JERSEY_SAMPLE_BOTTOM,
-            init_frames=config.KMEANS_INIT_FRAMES,
-            update_interval=config.KMEANS_UPDATE_INTERVAL,
-            crouch_threshold=config.CROUCH_THRESHOLD,
-            los_tolerance=config.LINE_OF_SCRIMMAGE_TOLERANCE
-        )
-    else:
-        if config.ENABLE_TEAM_CLASSIFICATION and not TEAM_CLASSIFIER_AVAILABLE:
-            print("  Skipped (module not available)")
-        modules['team_classifier'] = None
-    
-    # Field line detector
-    if config.ENABLE_BIRDS_EYE_VIEW and FIELD_HOMOGRAPHY_AVAILABLE:
-        print("Initializing bird's eye view system...")
-        modules['field_detector'] = FieldLineDetector()
-        modules['homography_calc'] = HomographyCalculator(
-            field_length=config.FIELD_LENGTH,
-            field_width=config.FIELD_WIDTH,
-            output_width=config.BIRDS_EYE_WIDTH,
-            output_height=config.BIRDS_EYE_HEIGHT
-        )
-        modules['birds_eye_view'] = BirdsEyeView(
-            width=config.BIRDS_EYE_WIDTH,
-            height=config.BIRDS_EYE_HEIGHT,
-            field_length=config.FIELD_LENGTH,
-            field_width=config.FIELD_WIDTH
-        )
-    else:
-        if config.ENABLE_BIRDS_EYE_VIEW and not FIELD_HOMOGRAPHY_AVAILABLE:
-            print("  Skipped (module not available)")
-        modules['field_detector'] = None
-        modules['homography_calc'] = None
-        modules['birds_eye_view'] = None
-    
-    return modules
-
-
-# ============================================================================
-# PART 2: ROI MASKING
-# ============================================================================
-
-def create_roi_mask(frame: np.ndarray, 
-                    top_percent: float = 0.2, 
-                    bottom_percent: float = 0.1) -> np.ndarray:
-    """
-    Create a Region of Interest (ROI) mask that excludes top and bottom portions.
-    
-    This removes scoreboard/UI (top) and lower crowd/ads (bottom), focusing
-    on the main play area.
-    
-    Args:
-        frame: Input frame
-        top_percent: Percentage of frame height to exclude from top (0.0-1.0)
-        bottom_percent: Percentage of frame height to exclude from bottom (0.0-1.0)
-        
-    Returns:
-        Binary mask (white = ROI, black = excluded)
-    """
-    height, width = frame.shape[:2]
-    
-    # Create white mask (all included initially)
-    mask = np.ones((height, width), dtype=np.uint8) * 255
-    
-    # Calculate exclusion boundaries
-    top_boundary = int(height * top_percent)
-    bottom_boundary = int(height * (1 - bottom_percent))
-    
-    # Black out excluded regions
-    mask[0:top_boundary, :] = 0  # Top region
-    mask[bottom_boundary:, :] = 0  # Bottom region
-    
-    return mask
-
-
-def apply_roi_mask(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Apply ROI mask to frame, setting excluded areas to black.
-    
-    Args:
-        frame: Input frame
-        mask: Binary ROI mask
-        
-    Returns:
-        Masked frame
-    """
-    # Convert mask to 3-channel if needed
-    if len(mask.shape) == 2:
-        mask_3ch = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    else:
-        mask_3ch = mask
-    
-    # Apply mask
-    masked_frame = cv2.bitwise_and(frame, mask_3ch)
-    
-    return masked_frame
-
-
-def visualize_roi(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """
-    Visualize ROI by drawing semi-transparent overlay.
-    
-    Args:
-        frame: Input frame
-        mask: Binary ROI mask
-        
-    Returns:
-        Frame with ROI visualization
-    """
-    vis = frame.copy()
-    
-    # Create semi-transparent red overlay for excluded regions
-    overlay = vis.copy()
-    overlay[mask == 0] = [0, 0, 200]  # Red for excluded
-    
-    # Blend with original
-    cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
-    
-    return vis
-
-
-# ============================================================================
-# PART 3: YOLO DETECTION
-# ============================================================================
-
-def run_yolo_detection(model, frame: np.ndarray, 
-                       conf_threshold: float = 0.5,
-                       target_classes: List[int] = [0, 32]) -> np.ndarray:
-    """
-    Run YOLO detection on frame and filter results.
-    
-    Args:
-        model: YOLO model instance
-        frame: Input frame (can be masked)
-        conf_threshold: Minimum confidence score
-        target_classes: List of COCO class IDs to detect
-                       0 = person, 32 = sports ball
-        
-    Returns:
-        detections: Array of shape (N, 5) with format [x1, y1, x2, y2, score]
-    """
-    # Run inference
-    results = model(frame, verbose=False, conf=conf_threshold)
-    
-    detections = []
-    
-    # Process results
-    for result in results:
-        boxes = result.boxes
-        
-        if boxes is None or len(boxes) == 0:
-            continue
-        
-        # Extract box data
-        for box in boxes:
-            # Get class ID
-            cls_id = int(box.cls[0])
+    for h_line in h_lines[:4]:  # Use first 4 horizontal lines
+        for v_line in v_lines[:2]:  # Use first 2 vertical lines
+            x1h, y1h, x2h, y2h = h_line
+            x1v, y1v, x2v, y2v = v_line
             
-            # Filter by target classes
-            if cls_id not in target_classes:
+            # Calculate intersection
+            denom = (x1h - x2h) * (y1v - y2v) - (y1h - y2h) * (x1v - x2v)
+            if abs(denom) < 1e-6:
                 continue
             
-            # Get bounding box coordinates
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            t = ((x1h - x1v) * (y1v - y2v) - (y1h - y1v) * (x1v - x2v)) / denom
             
-            # Get confidence score
-            conf = float(box.conf[0])
+            x = x1h + t * (x2h - x1h)
+            y = y1h + t * (y2h - y1h)
             
-            # Add to detections
-            detections.append([x1, y1, x2, y2, conf])
+            intersections.append((x, y))
     
-    # Convert to numpy array
-    if len(detections) > 0:
-        detections = np.array(detections)
+    return intersections
+
+
+def calculate_homography(first_frame: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Calculate static homography matrix from first frame.
+    
+    Args:
+        first_frame: First frame of video
+        
+    Returns:
+        Homography matrix or None if calculation fails
+    """
+    print("\nCalculating static homography from first frame...")
+    
+    # Detect field lines
+    h_lines, v_lines = detect_field_lines(first_frame)
+    
+    if len(h_lines) < 2 or len(v_lines) < 2:
+        print("  Warning: Insufficient lines detected")
+        return None
+    
+    # Find intersections (source points in video)
+    intersections = find_line_intersections(h_lines, v_lines)
+    
+    if len(intersections) < 4:
+        print("  Warning: Insufficient intersection points")
+        return None
+    
+    # Use first 4 intersections as source points
+    src_points = np.float32(intersections[:4])
+    
+    # Define destination points on top-down view
+    # Assuming intersections form a quadrilateral on the field
+    dst_points = np.float32([
+        [0, 0],                              # Top-left
+        [FIELD_WIDTH, 0],                    # Top-right
+        [0, FIELD_HEIGHT],                   # Bottom-left
+        [FIELD_WIDTH, FIELD_HEIGHT]          # Bottom-right
+    ])
+    
+    # Calculate homography matrix
+    H, status = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
+    
+    if H is not None:
+        print("  ✓ Homography matrix calculated successfully")
     else:
-        detections = np.empty((0, 5))
+        print("  ✗ Homography calculation failed")
     
-    return detections
-
-
-def separate_detections(detections: np.ndarray, model) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Separate detections into players and balls (for visualization purposes).
-    
-    Note: SORT doesn't need this separation, but useful for different colored boxes.
-    
-    Args:
-        detections: All detections
-        model: YOLO model (to check classes)
-        
-    Returns:
-        Tuple of (player_detections, ball_detections)
-    """
-    # For now, we'll assume all detections are players
-    # In a more sophisticated version, you could track class info
-    return detections, np.empty((0, 5))
+    return H
 
 
 # ============================================================================
-# PART 4: SORT TRACKING
+# PART 2: TEAM CLASSIFICATION VIA COLOR CLUSTERING
 # ============================================================================
 
-def update_tracker(tracker, detections: np.ndarray, tracker_type: str = 'sort', frame: np.ndarray = None) -> np.ndarray:
+def get_team_color(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
     """
-    Update tracker with new detections (supports both SORT and DeepSORT).
+    Extract dominant jersey color from bounding box (torso region).
     
     Args:
-        tracker: Tracker instance (SORT or DeepSORT)
-        detections: Array of shape (N, 5) with format [x1, y1, x2, y2, score]
-        tracker_type: Type of tracker ('sort' or 'deepsort')
-        frame: Original frame (required for DeepSORT)
+        frame: Full frame
+        bbox: Bounding box (x1, y1, x2, y2)
         
     Returns:
-        tracks: Array of shape (M, 5) with format [x1, y1, x2, y2, track_id]
+        Dominant HSV color or None
     """
-    if tracker_type == 'deepsort':
-        # DeepSORT requires different format
-        if len(detections) == 0:
-            tracks = tracker.update_tracks([], frame=frame)
-        else:
-            # Convert detections to DeepSORT format: [[bbox, confidence, class], ...]
-            dets_deepsort = []
-            for det in detections:
-                x1, y1, x2, y2, score = det
-                bbox = [x1, y1, x2 - x1, y2 - y1]  # Convert to [x, y, w, h]
-                dets_deepsort.append((bbox, score, 0))  # class=0 (person)
-            
-            tracks = tracker.update_tracks(dets_deepsort, frame=frame)
-        
-        # Convert DeepSORT tracks to standard format
-        tracks_array = []
-        for track in tracks:
-            if not track.is_confirmed():
-                continue
-            
-            bbox = track.to_ltrb()  # Get [left, top, right, bottom]
-            track_id = track.track_id
-            tracks_array.append([bbox[0], bbox[1], bbox[2], bbox[3], track_id])
-        
-        return np.array(tracks_array) if tracks_array else np.empty((0, 5))
+    x1, y1, x2, y2 = bbox
     
-    else:  # SORT
-        return tracker.update(detections)
+    # Ensure valid bbox
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+    
+    if x2 <= x1 or y2 <= y1:
+        return None
+    
+    # Extract torso region (upper 40% of bounding box)
+    bbox_height = y2 - y1
+    torso_y1 = int(y1 + bbox_height * 0.2)
+    torso_y2 = int(y1 + bbox_height * 0.6)
+    
+    if torso_y2 <= torso_y1:
+        return None
+    
+    torso_region = frame[torso_y1:torso_y2, x1:x2]
+    
+    if torso_region.size == 0:
+        return None
+    
+    # Convert to HSV
+    torso_hsv = cv2.cvtColor(torso_region, cv2.COLOR_BGR2HSV)
+    
+    # Reshape to list of pixels
+    pixels = torso_hsv.reshape(-1, 3).astype(np.float32)
+    
+    # Remove very dark pixels (shadows) and very bright pixels (glare)
+    brightness = pixels[:, 2]  # V channel
+    mask = (brightness > 40) & (brightness < 220)
+    filtered_pixels = pixels[mask]
+    
+    if len(filtered_pixels) < 10:
+        return None
+    
+    # Use K-Means to find dominant color (k=1)
+    kmeans = KMeans(n_clusters=1, n_init=10, random_state=42)
+    kmeans.fit(filtered_pixels)
+    dominant_color = kmeans.cluster_centers_[0]
+    
+    return dominant_color
 
 
-# ============================================================================
-# PART 5: VISUALIZATION
-# ============================================================================
-
-def draw_detections(frame: np.ndarray, 
-                   detections: np.ndarray,
-                   color: Tuple[int, int, int] = (0, 255, 0),
-                   label: str = "Detection") -> np.ndarray:
+def classify_team(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int]]:
     """
-    Draw detection bounding boxes on frame.
+    Classify team based on HSV color.
     
     Args:
-        frame: Input frame
-        detections: Array of detections [x1, y1, x2, y2, score]
-        color: BGR color tuple
-        label: Label prefix
+        hsv_color: Dominant HSV color (H, S, V)
         
     Returns:
-        Frame with drawn boxes
+        Tuple of (team_label, visualization_color_bgr)
     """
-    vis = frame.copy()
+    h, s, v = hsv_color
     
-    for det in detections:
-        x1, y1, x2, y2, score = det
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        
-        # Draw bounding box
-        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-        
-        # Draw label with confidence
-        text = f"{label}: {score:.2f}"
-        cv2.putText(vis, text, (x1, y1 - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    # Check Team A range
+    (h_min_a, s_min_a, v_min_a), (h_max_a, s_max_a, v_max_a) = TEAM_A_HSV_RANGE
+    if h_min_a <= h <= h_max_a and s_min_a <= s <= s_max_a and v_min_a <= v <= v_max_a:
+        return "Team A", TEAM_A_COLOR
     
-    return vis
-
-
-def draw_tracks(frame: np.ndarray, 
-                tracks: np.ndarray,
-                color: Tuple[int, int, int] = (255, 0, 255),
-                thickness: int = 2) -> np.ndarray:
-    """
-    Draw tracked objects with IDs on frame.
+    # Check Team B range
+    (h_min_b, s_min_b, v_min_b), (h_max_b, s_max_b, v_max_b) = TEAM_B_HSV_RANGE
+    if h_min_b <= h <= h_max_b and s_min_b <= s <= s_max_b and v_min_b <= v <= v_max_b:
+        return "Team B", TEAM_B_COLOR
     
-    This is the main visualization function - showing persistent track IDs.
+    # Check Referee range
+    (h_min_r, s_min_r, v_min_r), (h_max_r, s_max_r, v_max_r) = REFEREE_HSV_RANGE
+    if h_min_r <= h <= h_max_r and s_min_r <= s <= s_max_r and v_min_r <= v <= v_max_r:
+        return "Referee", REFEREE_COLOR
     
-    Args:
-        frame: Input frame
-        tracks: Array of tracks [x1, y1, x2, y2, track_id]
-        color: BGR color tuple
-        thickness: Line thickness
-        
-    Returns:
-        Frame with drawn tracks
-    """
-    vis = frame.copy()
-    
-    if len(tracks) == 0:
-        return vis
-    
-    for track in tracks:
-        try:
-            x1, y1, x2, y2, track_id = track
-            # Safely convert to int (handle both float and string)
-            x1, y1, x2, y2 = int(float(x1)), int(float(y1)), int(float(x2)), int(float(y2))
-            track_id = int(float(track_id))
-        except (ValueError, TypeError) as e:
-            # Skip invalid tracks
-            continue
-        
-        # Draw bounding box
-        cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
-        
-        # Draw track ID (most important!)
-        # Make ID very visible with background
-        text = f"ID: {track_id}"
-        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-        
-        # Draw background rectangle for text
-        cv2.rectangle(vis, 
-                     (x1, y1 - text_size[1] - 10),
-                     (x1 + text_size[0] + 10, y1),
-                     color, -1)
-        
-        # Draw text
-        cv2.putText(vis, text, (x1 + 5, y1 - 5),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        
-        # Draw center point
-        center_x = (x1 + x2) // 2
-        center_y = (y1 + y2) // 2
-        cv2.circle(vis, (center_x, center_y), 4, color, -1)
-    
-    return vis
-
-
-def create_display_simple(tracked_frame: np.ndarray,
-                         num_detections: int,
-                         num_tracks: int,
-                         fps: float,
-                         frame_count: int) -> np.ndarray:
-    """
-    Create simple, fast display with just tracked frame and stats.
-    
-    Args:
-        tracked_frame: Frame with tracks drawn
-        num_detections: Number of detections
-        num_tracks: Number of active tracks  
-        fps: Current FPS
-        frame_count: Current frame number
-        
-    Returns:
-        Display frame with stats overlay
-    """
-    display = tracked_frame.copy()
-    
-    # Add stats overlay
-    stats_y = 30
-    stats = [
-        f"Frame: {frame_count}",
-        f"FPS: {fps:.1f}",
-        f"Detections: {num_detections}",
-        f"Active Tracks: {num_tracks}",
-        f"Press 'q' to quit, 'p' to pause"
-    ]
-    
-    for stat in stats:
-        # Background
-        (w, h), _ = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(display, (5, stats_y - 20), (w + 15, stats_y + 5), (0, 0, 0), -1)
-        # Text
-        cv2.putText(display, stat, (10, stats_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        stats_y += 30
-    
-    return display
-
-
-def create_display(frame: np.ndarray, 
-                  masked_frame: np.ndarray,
-                  tracked_frame: np.ndarray,
-                  roi_mask: np.ndarray,
-                  num_detections: int,
-                  num_tracks: int,
-                  fps: float) -> np.ndarray:
-    """
-    Create comprehensive display showing all processing stages.
-    
-    Args:
-        frame: Original frame
-        masked_frame: Frame with ROI mask applied
-        tracked_frame: Frame with tracks drawn
-        roi_mask: Binary ROI mask
-        num_detections: Number of detections in current frame
-        num_tracks: Number of active tracks
-        fps: Current processing FPS
-        
-    Returns:
-        Combined display frame
-    """
-    # Visualize ROI on original frame
-    roi_vis = visualize_roi(frame, roi_mask)
-    
-    # Add info overlay to tracked frame
-    info_frame = tracked_frame.copy()
-    
-    # Draw semi-transparent info box
-    info_text = [
-        f"FPS: {fps:.1f}",
-        f"Detections: {num_detections}",
-        f"Active Tracks: {num_tracks}"
-    ]
-    
-    y_offset = 30
-    for text in info_text:
-        cv2.rectangle(info_frame, (10, y_offset - 25), (250, y_offset + 5), (0, 0, 0), -1)
-        cv2.putText(info_frame, text, (15, y_offset), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        y_offset += 35
-    
-    # Create 2x2 grid
-    # Top: ROI visualization | Masked frame
-    # Bottom: Tracked result | Info
-    
-    top_row = np.hstack([roi_vis, masked_frame])
-    bottom_row = np.hstack([tracked_frame, info_frame])
-    combined = np.vstack([top_row, bottom_row])
-    
-    # Add labels
-    label_color = (255, 255, 255)
-    label_bg = (0, 0, 0)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    
-    # Label each quadrant
-    h, w = frame.shape[:2]
-    labels = [
-        ("1. ROI Mask Visualization", (10, 30)),
-        ("2. Masked Frame (YOLO Input)", (w + 10, 30)),
-        ("3. Tracked Objects", (10, h + 30)),
-        ("4. Tracking Info", (w + 10, h + 30))
-    ]
-    
-    for text, (x, y) in labels:
-        text_size = cv2.getTextSize(text, font, 0.7, 2)[0]
-        cv2.rectangle(combined, (x - 5, y - 25), (x + text_size[0] + 5, y + 5), label_bg, -1)
-        cv2.putText(combined, text, (x, y), font, 0.7, label_color, 2)
-    
-    return combined
+    return "Unknown", UNKNOWN_COLOR
 
 
 # ============================================================================
-# MAIN PROCESSING LOOP
+# PART 3: TOP-DOWN VIEW CREATION
 # ============================================================================
 
-def process_video(video_path: str, output_path: Optional[str] = None):
+def create_field_template() -> np.ndarray:
     """
-    Main video processing loop with YOLO detection and SORT tracking.
+    Create a blank top-down field template with yard lines.
+    
+    Returns:
+        Field image with yard lines drawn
+    """
+    # Create green field
+    field = np.zeros((FIELD_HEIGHT, FIELD_WIDTH, 3), dtype=np.uint8)
+    field[:, :] = (34, 139, 34)  # Green
+    
+    # Draw yard lines every 10 yards
+    yards_per_pixel = FIELD_HEIGHT / FIELD_LENGTH_YARDS
+    
+    for yard in range(0, FIELD_LENGTH_YARDS + 1, 10):
+        y = int(yard * yards_per_pixel)
+        cv2.line(field, (0, y), (FIELD_WIDTH, y), (255, 255, 255), 2)
+        
+        # Add yard number
+        if 0 < yard < FIELD_LENGTH_YARDS:
+            cv2.putText(field, str(yard), (10, y - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    # Draw sidelines
+    cv2.rectangle(field, (0, 0), (FIELD_WIDTH - 1, FIELD_HEIGHT - 1),
+                 (255, 255, 255), 3)
+    
+    # Add title
+    cv2.putText(field, "TACTICAL VIEW", (FIELD_WIDTH // 2 - 60, 30),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    
+    return field
+
+
+def transform_point_to_topdown(point: Tuple[float, float], 
+                               homography: np.ndarray) -> Optional[Tuple[int, int]]:
+    """
+    Transform point from video coordinates to top-down view.
     
     Args:
-        video_path: Path to input video
-        output_path: Optional path to save output video
+        point: Point in video coordinates (x, y)
+        homography: Homography matrix
+        
+    Returns:
+        Transformed point or None
     """
-    print("="*60)
-    print("Football Player and Ball Tracker")
-    print("="*60)
+    if homography is None:
+        return None
     
-    # Load video
-    cap = cv2.VideoCapture(video_path)
+    # Convert to homogeneous coordinates
+    pt = np.array([[point]], dtype=np.float32)
+    
+    # Transform
+    transformed = cv2.perspectiveTransform(pt, homography)
+    
+    x, y = transformed[0][0]
+    
+    # Clip to field bounds
+    x = np.clip(x, 0, FIELD_WIDTH - 1)
+    y = np.clip(y, 0, FIELD_HEIGHT - 1)
+    
+    return (int(x), int(y))
+
+
+# ============================================================================
+# PART 4: MAIN PROCESSING PIPELINE
+# ============================================================================
+
+def process_video():
+    """
+    Main processing pipeline - analyzes entire video offline.
+    """
+    print("="*70)
+    print("  FOOTBALL VIDEO ANALYSIS TOOL")
+    print("="*70)
+    
+    # Step 1: Load video
+    print(f"\n[1/6] Loading video: {INPUT_VIDEO}")
+    cap = cv2.VideoCapture(INPUT_VIDEO)
+    
     if not cap.isOpened():
-        raise ValueError(f"Error: Could not open video file: {video_path}")
+        print(f"ERROR: Cannot open video file: {INPUT_VIDEO}")
+        return
     
     # Get video properties
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    print(f"\nVideo Properties:")
-    print(f"  Resolution: {frame_width}x{frame_height}")
-    print(f"  FPS: {fps}")
-    print(f"  Total frames: {frame_count_total}")
+    print(f"  ✓ Video loaded: {width}x{height} @ {fps:.1f} FPS, {total_frames} frames")
     
-    # Initialize models
-    print("\n" + "="*60)
-    print("Initializing Models...")
-    print("="*60)
+    # Step 2: Load YOLO model
+    print(f"\n[2/6] Loading YOLOv8 model: {YOLO_MODEL}")
+    model = YOLO(YOLO_MODEL)
+    print("  ✓ Model loaded successfully")
     
-    model = load_yolo_model(config.YOLO_MODEL_PATH)
-    tracker, tracker_type = initialize_tracker(use_deepsort=config.USE_DEEPSORT)
+    # Step 3: Calculate static homography from first frame
+    print("\n[3/6] Analyzing first frame for field geometry...")
+    ret, first_frame = cap.read()
+    if not ret:
+        print("ERROR: Cannot read first frame")
+        return
     
-    # Initialize advanced modules
-    print("\n" + "="*60)
-    print("Initializing Advanced Modules...")
-    print("="*60)
-    modules = initialize_advanced_modules()
+    homography_matrix = calculate_homography(first_frame)
     
-    # Initialize video writer if output path specified
-    writer = None
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        # Output is 2x2 grid
-        writer = cv2.VideoWriter(output_path, fourcc, fps,
-                                (frame_width * 2, frame_height * 2))
-        print(f"\nOutput will be saved to: {output_path}")
+    if homography_matrix is None:
+        print("  ⚠ Homography calculation failed - using identity matrix")
+        homography_matrix = np.eye(3, dtype=np.float32)
     
-    # Processing loop
-    print("\n" + "="*60)
-    print("Processing Video...")
-    print("="*60)
+    # Reset video to beginning
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    
+    # Step 4: Create field template
+    print("\n[4/6] Creating top-down field template...")
+    field_template = create_field_template()
+    print("  ✓ Field template created")
+    
+    # Step 5: Setup video writer
+    print(f"\n[5/6] Setting up output video: {OUTPUT_VIDEO}")
+    
+    # Output dimensions: side-by-side (original + tactical)
+    output_width = width + FIELD_WIDTH
+    output_height = max(height, FIELD_HEIGHT)
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (output_width, output_height))
+    
+    print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS")
+    
+    # Step 6: Process each frame
+    print(f"\n[6/6] Processing {total_frames} frames...")
+    print("  This may take a while - accuracy over speed!")
+    print()
     
     frame_count = 0
-    total_time = 0
-    
-    last_known_tracks = np.empty((0, 5))  # 마지막 추적 결과를 저장할 변수
-    detections_for_display = 0            # 화면에 표시할 탐지 개수 저장 변수
     
     while True:
-        start_time = time.time()
-        
-        # Read frame
         ret, frame = cap.read()
         if not ret:
-            print("\nEnd of video reached.")
             break
         
         frame_count += 1
         
-        # ====================================================================
-        # PART 2: ROI MASKING
-        # ====================================================================
-        
-        # Create ROI mask (exclude top and bottom)
-        roi_mask = create_roi_mask(frame, 
-                                   top_percent=config.ROI_TOP_PERCENT,
-                                   bottom_percent=config.ROI_BOTTOM_PERCENT)
-        
-        # Apply mask to frame
-        masked_frame = apply_roi_mask(frame, roi_mask)
+        # Progress indicator
+        if frame_count % 100 == 0:
+            progress = (frame_count / total_frames) * 100
+            print(f"  Progress: {frame_count}/{total_frames} ({progress:.1f}%)")
         
         # ====================================================================
-        # PART 3&4: YOLO DETECTION & SORT TRACKING
+        # YOLO DETECTION
         # ====================================================================
         
-        # 프레임 스킵 로직: FRAME_SKIP 간격으로만 분석 수행
-        # tracker.py의 while 루프 안
-        if frame_count % config.FRAME_SKIP == 0:
-        # --- 분석을 수행하는 프레임 ---
-            detections = run_yolo_detection(
-                model,
-                masked_frame,
-                conf_threshold=config.YOLO_CONF_THRESHOLD,
-                target_classes=config.YOLO_TARGET_CLASSES
-            )
-            tracks = update_tracker(tracker, detections, tracker_type=tracker_type, frame=frame)
-
-            # 결과를 다음 프레임들을 위해 저장
-            last_known_tracks = tracks
-            detections_for_display = len(detections) # 실제 탐지된 개수를 저장
-        else:
-            # --- 분석을 건너뛰는 프레임 ---
-            tracks = last_known_tracks
-            detections_for_display = 0 # 탐지를 안했으므로 0으로 설정
+        # Run YOLO to detect all persons
+        results = model(frame, verbose=False, conf=YOLO_CONFIDENCE)
+        
+        # ====================================================================
+        # PROCESS DETECTIONS
+        # ====================================================================
+        
+        # Create fresh top-down view for this frame
+        topdown_view = field_template.copy()
+        
+        # Annotate original frame
+        annotated_frame = frame.copy()
+        
+        # Process each detected person
+        for result in results:
+            if result.boxes is None:
+                continue
             
+            for box in result.boxes:
+                # Only process 'person' class (class 0 in COCO)
+                if int(box.cls[0]) != 0:
+                    continue
+                
+                # Get bounding box
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                conf = float(box.conf[0])
+                
+                # ============================================================
+                # TEAM CLASSIFICATION
+                # ============================================================
+                
+                # Extract dominant jersey color
+                dominant_color_hsv = get_team_color(frame, (x1, y1, x2, y2))
+                
+                if dominant_color_hsv is not None:
+                    team_label, box_color = classify_team(dominant_color_hsv)
+                else:
+                    team_label, box_color = "Unknown", UNKNOWN_COLOR
+                
+                # ============================================================
+                # DRAW ON ORIGINAL FRAME
+                # ============================================================
+                
+                # Draw bounding box with team color
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
+                
+                # Draw label above box
+                label = f"{team_label} ({conf:.2f})"
+                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                
+                # Label background
+                cv2.rectangle(annotated_frame, (x1, y1 - text_h - 10), 
+                             (x1 + text_w + 10, y1), box_color, -1)
+                
+                # Label text
+                cv2.putText(annotated_frame, label, (x1 + 5, y1 - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                
+                # ============================================================
+                # TRANSFORM TO TOP-DOWN VIEW
+                # ============================================================
+                
+                # Calculate foot position (bottom center of bbox)
+                foot_x = (x1 + x2) / 2
+                foot_y = y2
+                
+                # Transform to top-down coordinates
+                topdown_point = transform_point_to_topdown((foot_x, foot_y), homography_matrix)
+                
+                if topdown_point is not None:
+                    # Draw player position on tactical map
+                    cv2.circle(topdown_view, topdown_point, 6, box_color, -1)
+                    cv2.circle(topdown_view, topdown_point, 7, (0, 0, 0), 1)
+        
         # ====================================================================
-        # PART 5: VISUALIZATION
+        # CREATE SIDE-BY-SIDE OUTPUT
         # ====================================================================
         
-        # Draw tracks on original frame
-        tracked_frame = draw_tracks(frame, tracks, 
-                                    color=config.TRACK_COLOR,
-                                    thickness=config.TRACK_THICKNESS)
+        # Resize tactical view to match frame height if needed
+        if topdown_view.shape[0] != height:
+            topdown_resized = cv2.resize(topdown_view, (FIELD_WIDTH, height))
+        else:
+            topdown_resized = topdown_view
         
-        # Calculate FPS
-        elapsed = time.time() - start_time
-        total_time += elapsed
-        current_fps = 1.0 / elapsed if elapsed > 0 else 0
-        avg_fps = frame_count / total_time if total_time > 0 else 0
+        # Combine original (annotated) and tactical view side-by-side
+        combined = np.hstack([annotated_frame, topdown_resized])
         
-        # Create simple, fast display (single panel instead of 2x2 grid)
-        display = create_display_simple(tracked_frame, detections_for_display, 
-                                       len(tracks), avg_fps, frame_count)
+        # Ensure correct output dimensions
+        if combined.shape[0] != output_height or combined.shape[1] != output_width:
+            combined = cv2.resize(combined, (output_width, output_height))
         
-        # Resize for speed (smaller window = faster rendering)
-        if display.shape[1] > 1280:
-            scale = 1280 / display.shape[1]
-            w = int(display.shape[1] * scale)
-            h = int(display.shape[0] * scale)
-            display = cv2.resize(display, (w, h))
+        # Write to output video
+        out.write(combined)
         
-        cv2.imshow('Football Tracker - Real-Time', display)
-        
-        # Write to output if specified
-        if writer:
-            writer.write(display)
-        
-        # Print progress (less frequently)
-        if frame_count % 30 == 0:
-            print(f"Frame {frame_count}/{frame_count_total} | "
-                  f"Detections: {detections_for_display} | "
-                  f"Tracks: {len(tracks)} | "
-                  f"FPS: {avg_fps:.1f}")
-        
-        # ====================================================================
-        # USER CONTROLS
-        # ====================================================================
-        
-        # Non-blocking key check for real-time playback
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            print("\nUser requested quit.")
-            break
-        elif key == ord('p'):
-            print("\nPaused. Press any key to continue...")
-            cv2.waitKey(0)
+        # Optional: Show preview (comment out for faster processing)
+        # cv2.imshow('Processing...', cv2.resize(combined, (1280, 720)))
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
     
     # Cleanup
     cap.release()
-    if writer:
-        writer.release()
+    out.release()
     cv2.destroyAllWindows()
     
-    print(f"\n" + "="*60)
-    print(f"Processing Complete!")
-    print(f"  Total frames processed: {frame_count}")
-    print(f"  Average FPS: {frame_count / total_time:.1f}")
-    print("="*60)
+    print(f"\n  ✓ Processing complete!")
+    print(f"\n{'='*70}")
+    print("  ANALYSIS COMPLETE")
+    print("="*70)
+    print(f"\nOutput saved to: {OUTPUT_VIDEO}")
+    print(f"Total frames processed: {frame_count}")
+    print(f"\nOpen {OUTPUT_VIDEO} to view the analysis.")
+    print("\nFeatures in output:")
+    print("  • Left side: Original video with team-colored bounding boxes")
+    print("  • Right side: Top-down tactical view showing player positions")
+    print("  • Color coding: Team A (blue), Team B (red), Referee (yellow)")
 
 
 # ============================================================================
-# ENTRY POINT
+# MAIN ENTRY POINT
 # ============================================================================
 
 if __name__ == "__main__":
     try:
-        process_video(config.VIDEO_INPUT_PATH, config.VIDEO_OUTPUT_PATH)
+        process_video()
+    except KeyboardInterrupt:
+        print("\n\nProcessing interrupted by user.")
     except Exception as e:
-        print(f"\nError: {e}")
+        print(f"\nERROR: {e}")
         import traceback
         traceback.print_exc()
-
