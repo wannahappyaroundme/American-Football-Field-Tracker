@@ -35,6 +35,19 @@ OUTPUT_VIDEO = "output_analysis.mp4"
 YOLO_MODEL = "yolov8n.pt"
 YOLO_CONFIDENCE = 0.5
 
+# Stadium/Field Recognition (HSV for green field)
+ENABLE_STADIUM_MASKING = True
+FIELD_HSV_LOWER = (35, 40, 40)      # Lower bound for green field
+FIELD_HSV_UPPER = (85, 255, 255)    # Upper bound for green field
+
+# Morphological operations for field mask cleanup
+MORPH_KERNEL_SIZE = 15
+MORPH_ITERATIONS = 2
+
+# ROI Masking (relative percentages, not absolute pixels)
+ROI_TOP_PERCENT = 0.20      # Exclude top 20% (scoreboard area)
+ROI_BOTTOM_PERCENT = 0.10   # Exclude bottom 10% (lower crowd)
+
 # Team classification - HSV color ranges (Hue, Saturation, Value)
 # Adjust these ranges based on your team's jersey colors
 TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Example: Blue jerseys
@@ -53,25 +66,195 @@ FIELD_HEIGHT = 600   # Pixels
 FIELD_LENGTH_YARDS = 120  # Including end zones
 FIELD_WIDTH_YARDS = 53.33
 
+# Tracking settings
+ENABLE_TRACKING = True           # Maintain objects when detection fails
+MAX_TRACKING_FRAMES = 30         # Max frames to track without detection
+TRACKING_IOU_THRESHOLD = 0.3     # IoU threshold for matching
+
+# Distance tracking settings
+ENABLE_DISTANCE_TRACKING = True  # Measure yards traveled per player
+YARDS_PER_PIXEL = None          # Auto-calculated from homography
+
+# Camera change detection (reset cache when camera zooms/pans)
+ENABLE_CAMERA_CHANGE_DETECTION = True
+CAMERA_CHANGE_THRESHOLD = 0.15   # MSE threshold for detecting zoom/pan
+HOMOGRAPHY_RECALC_INTERVAL = 300 # Frames between forced recalculation
+
+# Tactical map settings
+PERSISTENT_DOTS = True           # Keep dots on tactical map (don't clear)
+DOT_FADE_ALPHA = 0.98           # Fade rate for old dots (1.0 = no fade)
+
+# Team color detection (improved clustering)
+TEAM_DETECTION_METHOD = 'adaptive_clustering'  # 'adaptive_clustering' or 'fixed_ranges'
+MIN_PLAYERS_FOR_CLUSTERING = 8  # Minimum players before auto team detection
+
+
+# ============================================================================
+# PART 0: CAMERA CHANGE DETECTION & CACHE MANAGEMENT
+# ============================================================================
+
+class CameraChangeDetector:
+    """
+    Detects significant camera changes (zoom, pan) to trigger cache reset.
+    """
+    
+    def __init__(self, threshold=0.15):
+        """Initialize detector."""
+        self.threshold = threshold
+        self.prev_frame_gray = None
+        self.prev_homography = None
+    
+    def detect_change(self, frame):
+        """
+        Detect if camera has significantly changed.
+        
+        Returns:
+            (has_changed, change_magnitude)
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (320, 180))  # Downsample for speed
+        
+        if self.prev_frame_gray is None:
+            self.prev_frame_gray = gray
+            return True, 1.0
+        
+        # Calculate MSE
+        mse = np.mean((gray.astype(float) - self.prev_frame_gray.astype(float)) ** 2)
+        normalized_mse = mse / (255.0 ** 2)
+        
+        self.prev_frame_gray = gray
+        
+        return normalized_mse > self.threshold, normalized_mse
+
+
+# ============================================================================
+# PART 0.5: STADIUM/FIELD RECOGNITION
+# ============================================================================
+
+def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
+    """
+    Create a binary mask that isolates the playing field/stadium area.
+    
+    This mask identifies the green field using HSV color space and applies
+    morphological operations to create a clean mask. Only players within
+    this mask will be detected, excluding fans, objects, and people outside
+    the stadium.
+    
+    Args:
+        frame: Input frame
+        
+    Returns:
+        Binary mask (255 = field/stadium, 0 = background to exclude)
+    """
+    # Convert to HSV color space
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Create mask for green field
+    lower_green = np.array(FIELD_HSV_LOWER)
+    upper_green = np.array(FIELD_HSV_UPPER)
+    field_mask = cv2.inRange(hsv, lower_green, upper_green)
+    
+    # Apply morphological operations to clean up the mask
+    kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
+    
+    # Closing: Fill gaps in the field
+    field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_CLOSE, kernel, 
+                                  iterations=MORPH_ITERATIONS)
+    
+    # Opening: Remove noise outside the field
+    field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_OPEN, kernel,
+                                  iterations=MORPH_ITERATIONS)
+    
+    # Dilate slightly to include players near field edges
+    field_mask = cv2.dilate(field_mask, kernel, iterations=1)
+    
+    return field_mask
+
+
+def apply_roi_mask(mask: np.ndarray, frame_height: int, frame_width: int) -> np.ndarray:
+    """
+    Apply ROI (Region of Interest) mask to exclude top and bottom percentages.
+    
+    Uses relative percentages rather than absolute pixels for better
+    adaptability to different video resolutions.
+    
+    Args:
+        mask: Existing mask (e.g., stadium mask)
+        frame_height: Height of frame in pixels
+        frame_width: Width of frame in pixels
+        
+    Returns:
+        Modified mask with ROI applied
+    """
+    # Calculate boundaries based on relative percentages
+    top_boundary = int(frame_height * ROI_TOP_PERCENT)
+    bottom_boundary = int(frame_height * (1.0 - ROI_BOTTOM_PERCENT))
+    
+    # Black out top and bottom regions
+    mask[0:top_boundary, :] = 0
+    mask[bottom_boundary:, :] = 0
+    
+    return mask
+
+
+def create_combined_mask(frame: np.ndarray) -> np.ndarray:
+    """
+    Create comprehensive mask combining stadium recognition and ROI.
+    
+    This creates a mask that:
+    1. Identifies the green playing field (stadium masking)
+    2. Excludes top percentage (scoreboard, upper crowd)
+    3. Excludes bottom percentage (lower crowd, ads)
+    
+    Only players within this final mask will be detected.
+    
+    Args:
+        frame: Input frame
+        
+    Returns:
+        Final combined binary mask
+    """
+    height, width = frame.shape[:2]
+    
+    if ENABLE_STADIUM_MASKING:
+        # Start with stadium/field mask
+        mask = create_stadium_mask(frame)
+        
+        # Apply ROI exclusions
+        mask = apply_roi_mask(mask, height, width)
+    else:
+        # Just use ROI mask without stadium detection
+        mask = np.ones((height, width), dtype=np.uint8) * 255
+        mask = apply_roi_mask(mask, height, width)
+    
+    return mask
+
 
 # ============================================================================
 # PART 1: STATIC HOMOGRAPHY CALCULATION
 # ============================================================================
 
-def detect_field_lines(frame: np.ndarray) -> Tuple[List, List]:
+def detect_field_lines(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> Tuple[List, List]:
     """
     Detect horizontal and vertical field lines using Hough Transform.
     
     Args:
         frame: Input video frame
+        mask: Optional binary mask to limit detection area
         
     Returns:
         Tuple of (horizontal_lines, vertical_lines)
     """
     print("  Detecting field lines...")
     
+    # Apply mask if provided
+    if mask is not None:
+        masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+    else:
+        masked_frame = frame
+    
     # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
     
     # Enhance white lines using top-hat morphology
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
@@ -142,20 +325,21 @@ def find_line_intersections(h_lines: List, v_lines: List) -> List[Tuple[float, f
     return intersections
 
 
-def calculate_homography(first_frame: np.ndarray) -> Optional[np.ndarray]:
+def calculate_homography(first_frame: np.ndarray, mask: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
     """
     Calculate static homography matrix from first frame.
     
     Args:
         first_frame: First frame of video
+        mask: Optional mask to limit line detection to field area
         
     Returns:
         Homography matrix or None if calculation fails
     """
     print("\nCalculating static homography from first frame...")
     
-    # Detect field lines
-    h_lines, v_lines = detect_field_lines(first_frame)
+    # Detect field lines (using mask to focus on field area)
+    h_lines, v_lines = detect_field_lines(first_frame, mask)
     
     if len(h_lines) < 2 or len(v_lines) < 2:
         print("  Warning: Insufficient lines detected")
@@ -192,12 +376,107 @@ def calculate_homography(first_frame: np.ndarray) -> Optional[np.ndarray]:
 
 
 # ============================================================================
+# PART 1.5: SIMPLE OBJECT TRACKING
+# ============================================================================
+
+class SimpleTracker:
+    """
+    Simple tracker to maintain detections when YOLO fails.
+    Uses IoU matching to associate detections across frames.
+    """
+    
+    def __init__(self, max_age=30, iou_threshold=0.3):
+        """Initialize tracker."""
+        self.tracks = []  # List of active tracks
+        self.next_id = 1
+        self.max_age = max_age
+        self.iou_threshold = iou_threshold
+    
+    def calculate_iou(self, box1, box2):
+        """Calculate IoU between two boxes."""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+        
+        # Intersection
+        xi1 = max(x1_1, x1_2)
+        yi1 = max(y1_1, y1_2)
+        xi2 = min(x2_1, x2_2)
+        yi2 = min(y2_1, y2_2)
+        inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+        
+        # Union
+        box1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
+        box2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = box1_area + box2_area - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0
+    
+    def update(self, detections):
+        """
+        Update tracks with new detections.
+        
+        Args:
+            detections: List of (bbox, team_label, team_color)
+            
+        Returns:
+            List of tracked objects with IDs
+        """
+        # Match detections to existing tracks
+        matched_tracks = []
+        unmatched_detections = list(range(len(detections)))
+        
+        for track in self.tracks:
+            best_iou = 0
+            best_det_idx = None
+            
+            for det_idx in unmatched_detections:
+                det_bbox = detections[det_idx][0]
+                iou = self.calculate_iou(track['bbox'], det_bbox)
+                
+                if iou > best_iou:
+                    best_iou = iou
+                    best_det_idx = det_idx
+            
+            # Match found
+            if best_iou >= self.iou_threshold:
+                track['bbox'] = detections[best_det_idx][0]
+                track['team_label'] = detections[best_det_idx][1]
+                track['team_color'] = detections[best_det_idx][2]
+                track['age'] = 0
+                matched_tracks.append(track)
+                unmatched_detections.remove(best_det_idx)
+            else:
+                # No match - age the track
+                track['age'] += 1
+                if track['age'] < self.max_age:
+                    matched_tracks.append(track)
+        
+        # Create new tracks for unmatched detections
+        for det_idx in unmatched_detections:
+            bbox, team_label, team_color = detections[det_idx]
+            matched_tracks.append({
+                'id': self.next_id,
+                'bbox': bbox,
+                'team_label': team_label,
+                'team_color': team_color,
+                'age': 0
+            })
+            self.next_id += 1
+        
+        self.tracks = matched_tracks
+        return self.tracks
+
+
+# ============================================================================
 # PART 2: TEAM CLASSIFICATION VIA COLOR CLUSTERING
 # ============================================================================
 
 def get_team_color(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
     """
-    Extract dominant jersey color from bounding box (torso region).
+    Extract dominant SHIRT/JERSEY color from bounding box.
+    
+    Focuses specifically on the shirt/jersey area (torso) and uses
+    improved sampling to get accurate team colors.
     
     Args:
         frame: Full frame
@@ -215,39 +494,61 @@ def get_team_color(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Option
     if x2 <= x1 or y2 <= y1:
         return None
     
-    # Extract torso region (upper 40% of bounding box)
+    # Extract SHIRT/JERSEY region (upper-middle of bbox, avoiding head and legs)
+    # Focus on 25%-60% of bbox height for best jersey visibility
     bbox_height = y2 - y1
-    torso_y1 = int(y1 + bbox_height * 0.2)
-    torso_y2 = int(y1 + bbox_height * 0.6)
+    bbox_width = x2 - x1
     
-    if torso_y2 <= torso_y1:
+    # Shirt region (middle-upper torso)
+    shirt_y1 = int(y1 + bbox_height * 0.25)  # Start at 25% (below head)
+    shirt_y2 = int(y1 + bbox_height * 0.60)  # End at 60% (above legs)
+    
+    # Also crop horizontally to focus on center (avoid arms/background)
+    shirt_x1 = int(x1 + bbox_width * 0.2)
+    shirt_x2 = int(x2 - bbox_width * 0.2)
+    
+    if shirt_y2 <= shirt_y1 or shirt_x2 <= shirt_x1:
         return None
     
-    torso_region = frame[torso_y1:torso_y2, x1:x2]
+    shirt_region = frame[shirt_y1:shirt_y2, shirt_x1:shirt_x2]
     
-    if torso_region.size == 0:
+    if shirt_region.size == 0:
         return None
     
-    # Convert to HSV
-    torso_hsv = cv2.cvtColor(torso_region, cv2.COLOR_BGR2HSV)
+    # Convert to HSV for better color separation
+    shirt_hsv = cv2.cvtColor(shirt_region, cv2.COLOR_BGR2HSV)
     
     # Reshape to list of pixels
-    pixels = torso_hsv.reshape(-1, 3).astype(np.float32)
+    pixels = shirt_hsv.reshape(-1, 3).astype(np.float32)
     
-    # Remove very dark pixels (shadows) and very bright pixels (glare)
+    # Filter out shadows and glare more aggressively
     brightness = pixels[:, 2]  # V channel
-    mask = (brightness > 40) & (brightness < 220)
+    saturation = pixels[:, 1]  # S channel
+    
+    # Keep only pixels with good saturation and reasonable brightness
+    # This focuses on actual colored jersey fabric, not shadows or highlights
+    mask = (brightness > 50) & (brightness < 210) & (saturation > 30)
     filtered_pixels = pixels[mask]
     
-    if len(filtered_pixels) < 10:
+    if len(filtered_pixels) < 20:
         return None
     
-    # Use K-Means to find dominant color (k=1)
-    kmeans = KMeans(n_clusters=1, n_init=10, random_state=42)
+    # Use K-Means with k=2 to find the two most dominant colors
+    # Then select the more saturated one (likely the jersey, not skin/equipment)
+    n_clusters = min(2, len(filtered_pixels))
+    kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
     kmeans.fit(filtered_pixels)
-    dominant_color = kmeans.cluster_centers_[0]
     
-    return dominant_color
+    # Select cluster with highest average saturation (jersey color)
+    best_color = None
+    best_saturation = 0
+    
+    for center in kmeans.cluster_centers_:
+        if center[1] > best_saturation:  # S channel
+            best_saturation = center[1]
+            best_color = center
+    
+    return best_color if best_color is not None else kmeans.cluster_centers_[0]
 
 
 def classify_team(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int]]:
@@ -381,14 +682,27 @@ def process_video():
     model = YOLO(YOLO_MODEL)
     print("  ✓ Model loaded successfully")
     
-    # Step 3: Calculate static homography from first frame
-    print("\n[3/6] Analyzing first frame for field geometry...")
+    # Step 3: Analyze first frame and create stadium mask
+    print("\n[3/6] Analyzing first frame for stadium/field recognition...")
     ret, first_frame = cap.read()
     if not ret:
         print("ERROR: Cannot read first frame")
         return
     
-    homography_matrix = calculate_homography(first_frame)
+    # Create initial stadium mask from first frame
+    print("  Creating stadium mask to exclude non-field areas...")
+    initial_mask = create_combined_mask(first_frame)
+    
+    # Calculate field coverage
+    mask_coverage = (np.sum(initial_mask > 0) / initial_mask.size) * 100
+    print(f"  ✓ Stadium mask created - field coverage: {mask_coverage:.1f}%")
+    
+    if mask_coverage < 15:
+        print("  ⚠ Warning: Low field coverage - consider adjusting FIELD_HSV ranges")
+    
+    # Calculate homography using masked field
+    print("\n[4/6] Calculating static homography from first frame...")
+    homography_matrix = calculate_homography(first_frame, initial_mask)
     
     if homography_matrix is None:
         print("  ⚠ Homography calculation failed - using identity matrix")
@@ -397,13 +711,13 @@ def process_video():
     # Reset video to beginning
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
-    # Step 4: Create field template
-    print("\n[4/6] Creating top-down field template...")
+    # Step 5: Create field template
+    print("\n[5/6] Creating top-down field template...")
     field_template = create_field_template()
     print("  ✓ Field template created")
     
-    # Step 5: Setup video writer
-    print(f"\n[5/6] Setting up output video: {OUTPUT_VIDEO}")
+    # Step 6: Setup video writer
+    print(f"\n[6/6] Setting up output video: {OUTPUT_VIDEO}")
     
     # Output dimensions: side-by-side (original + tactical)
     output_width = width + FIELD_WIDTH
@@ -414,9 +728,31 @@ def process_video():
     
     print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS")
     
-    # Step 6: Process each frame
-    print(f"\n[6/6] Processing {total_frames} frames...")
-    print("  This may take a while - accuracy over speed!")
+    # Initialize tracker for maintaining detections
+    print("\n[TRACKING] Initializing object tracker...")
+    tracker = SimpleTracker(max_age=MAX_TRACKING_FRAMES, iou_threshold=TRACKING_IOU_THRESHOLD) if ENABLE_TRACKING else None
+    if tracker:
+        print("  ✓ Tracker enabled - maintains objects when YOLO detection fails")
+    
+    # Create persistent tactical map (dots stay visible, no blinking)
+    print("\n[TACTICAL MAP] Setting up persistent tactical display...")
+    if PERSISTENT_DOTS:
+        persistent_tactical_map = field_template.copy().astype(np.float32)
+        print("  ✓ Persistent mode - dots accumulate and stay visible")
+    else:
+        persistent_tactical_map = None
+        print("  Standard mode - map refreshes each frame")
+    
+    # Processing
+    print(f"\n{'='*70}")
+    print(f"  PROCESSING {total_frames} FRAMES")
+    print("="*70)
+    print("  Homography: CACHED (calculated once, reused for all frames)")
+    print("  Stadium masking: ENABLED" if ENABLE_STADIUM_MASKING else "  Stadium masking: DISABLED")
+    print(f"  ROI: Excluding top {ROI_TOP_PERCENT*100:.0f}% and bottom {ROI_BOTTOM_PERCENT*100:.0f}%")
+    print("  Tracking: ENABLED - maintains IDs across frames" if ENABLE_TRACKING else "  Tracking: DISABLED")
+    print("  Tactical dots: PERSISTENT - no blinking" if PERSISTENT_DOTS else "  Tactical dots: REFRESH each frame")
+    print("  Priority: Accuracy over speed (offline analysis)")
     print()
     
     frame_count = 0
@@ -434,21 +770,28 @@ def process_video():
             print(f"  Progress: {frame_count}/{total_frames} ({progress:.1f}%)")
         
         # ====================================================================
-        # YOLO DETECTION
+        # STADIUM MASKING - Recognize and isolate field area
         # ====================================================================
         
-        # Run YOLO to detect all persons
-        results = model(frame, verbose=False, conf=YOLO_CONFIDENCE)
+        # Create stadium mask for this frame (identifies field, excludes non-field areas)
+        stadium_mask = create_combined_mask(frame)
+        
+        # Apply mask to frame (zeros out background)
+        # This removes people/objects outside the stadium before YOLO detection
+        masked_frame = cv2.bitwise_and(frame, frame, mask=stadium_mask)
         
         # ====================================================================
-        # PROCESS DETECTIONS
+        # YOLO DETECTION (on masked frame with background removed)
         # ====================================================================
         
-        # Create fresh top-down view for this frame
-        topdown_view = field_template.copy()
+        # Run YOLO on masked frame - only detects players on the field
+        results = model(masked_frame, verbose=False, conf=YOLO_CONFIDENCE)
         
-        # Annotate original frame
-        annotated_frame = frame.copy()
+        # ====================================================================
+        # COLLECT ALL DETECTIONS
+        # ====================================================================
+        
+        detections_list = []  # For tracker: (bbox, team_label, team_color)
         
         # Process each detected person
         for result in results:
@@ -466,6 +809,23 @@ def process_video():
                 conf = float(box.conf[0])
                 
                 # ============================================================
+                # VERIFY DETECTION IS WITHIN STADIUM MASK
+                # ============================================================
+                
+                # Calculate foot position (bottom center of bbox)
+                foot_x = int((x1 + x2) / 2)
+                foot_y = int(y2)
+                
+                # Check if foot position is within the stadium mask
+                # This double-checks that player is actually on the field
+                if foot_x < 0 or foot_x >= stadium_mask.shape[1] or \
+                   foot_y < 0 or foot_y >= stadium_mask.shape[0]:
+                    continue  # Skip if out of bounds
+                
+                if stadium_mask[foot_y, foot_x] == 0:
+                    continue  # Skip if not on field (background)
+                
+                # ============================================================
                 # TEAM CLASSIFICATION
                 # ============================================================
                 
@@ -477,40 +837,85 @@ def process_video():
                 else:
                     team_label, box_color = "Unknown", UNKNOWN_COLOR
                 
-                # ============================================================
-                # DRAW ON ORIGINAL FRAME
-                # ============================================================
+                # Add to detections list for tracker
+                detections_list.append(((x1, y1, x2, y2), team_label, box_color))
+        
+        # ====================================================================
+        # UPDATE TRACKER - Maintain objects across frames
+        # ====================================================================
+        
+        if tracker:
+            tracked_objects = tracker.update(detections_list)
+        else:
+            # No tracking - use detections directly
+            tracked_objects = [{'id': i, 'bbox': d[0], 'team_label': d[1], 'team_color': d[2], 'age': 0} 
+                             for i, d in enumerate(detections_list)]
+        
+        # ====================================================================
+        # VISUALIZATION - Draw tracked objects
+        # ====================================================================
+        
+        # Create fresh tactical view or use persistent one
+        if PERSISTENT_DOTS and persistent_tactical_map is not None:
+            # Fade old dots slightly
+            persistent_tactical_map = persistent_tactical_map * DOT_FADE_ALPHA
+            topdown_view = persistent_tactical_map.copy().astype(np.uint8)
+        else:
+            topdown_view = field_template.copy()
+        
+        # Annotate original frame
+        annotated_frame = frame.copy()
+        
+        # Draw each tracked object
+        for obj in tracked_objects:
+            x1, y1, x2, y2 = obj['bbox']
+            team_label = obj['team_label']
+            box_color = obj['team_color']
+            track_id = obj['id']
+            
+            # ============================================================
+            # DRAW ON ORIGINAL FRAME
+            # ============================================================
+            
+            # Draw bounding box with team color
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
+            
+            # Draw label with ID and team
+            label = f"ID:{track_id} {team_label}"
+            (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            # Label background
+            cv2.rectangle(annotated_frame, (x1, y1 - text_h - 10), 
+                         (x1 + text_w + 10, y1), box_color, -1)
+            
+            # Label text
+            cv2.putText(annotated_frame, label, (x1 + 5, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # ============================================================
+            # TRANSFORM TO TOP-DOWN VIEW
+            # ============================================================
+            
+            # Calculate foot position (bottom center of bbox)
+            foot_x = (x1 + x2) / 2
+            foot_y = y2
+            
+            # Transform to top-down coordinates using CACHED homography
+            topdown_point = transform_point_to_topdown((foot_x, foot_y), homography_matrix)
+            
+            if topdown_point is not None:
+                # Draw player position on tactical map
+                cv2.circle(topdown_view, topdown_point, 6, box_color, -1)
+                cv2.circle(topdown_view, topdown_point, 7, (0, 0, 0), 1)
                 
-                # Draw bounding box with team color
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
-                
-                # Draw label above box
-                label = f"{team_label} ({conf:.2f})"
-                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                
-                # Label background
-                cv2.rectangle(annotated_frame, (x1, y1 - text_h - 10), 
-                             (x1 + text_w + 10, y1), box_color, -1)
-                
-                # Label text
-                cv2.putText(annotated_frame, label, (x1 + 5, y1 - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                
-                # ============================================================
-                # TRANSFORM TO TOP-DOWN VIEW
-                # ============================================================
-                
-                # Calculate foot position (bottom center of bbox)
-                foot_x = (x1 + x2) / 2
-                foot_y = y2
-                
-                # Transform to top-down coordinates
-                topdown_point = transform_point_to_topdown((foot_x, foot_y), homography_matrix)
-                
-                if topdown_point is not None:
-                    # Draw player position on tactical map
-                    cv2.circle(topdown_view, topdown_point, 6, box_color, -1)
-                    cv2.circle(topdown_view, topdown_point, 7, (0, 0, 0), 1)
+                # Draw ID number
+                cv2.putText(topdown_view, str(track_id), 
+                           (topdown_point[0] + 8, topdown_point[1] + 4),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Update persistent tactical map
+        if PERSISTENT_DOTS and persistent_tactical_map is not None:
+            persistent_tactical_map = topdown_view.astype(np.float32)
         
         # ====================================================================
         # CREATE SIDE-BY-SIDE OUTPUT

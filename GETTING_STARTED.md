@@ -36,7 +36,16 @@ Installs only 4 packages:
 **⚠️ IMPORTANT**: Before running, adjust team colors in `tracker.py`:
 
 ```python
-# Edit these lines (around line 30):
+# Stadium Recognition (lines 38-50 in tracker.py)
+ENABLE_STADIUM_MASKING = True              # Exclude non-field areas
+FIELD_HSV_LOWER = (35, 40, 40)            # Green field detection
+FIELD_HSV_UPPER = (85, 255, 255)
+
+# ROI Masking (relative percentages)
+ROI_TOP_PERCENT = 0.20     # Exclude top 20%
+ROI_BOTTOM_PERCENT = 0.10  # Exclude bottom 10%
+
+# Team Colors (lines 51-55) - MOST IMPORTANT!
 TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Blue jerseys
 TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))      # White jerseys
 REFEREE_HSV_RANGE = ((0, 0, 0), (180, 255, 60))       # Black jerseys
