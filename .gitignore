@@ -34,10 +34,10 @@ env/
 
 # Project specific
 # Videos (large files)
-*.mp4
-*.avi
-*.mov
-*.mkv
+# *.mp4
+# *.avi
+# *.mov
+# *.mkv
 
 # Images (if you want to exclude test frames)
 # *.jpg
