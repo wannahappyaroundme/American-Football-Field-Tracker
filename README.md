@@ -14,6 +14,33 @@ This project provides an offline video analysis system for American football foo
 
 ## Changelog
 
+### v2.1 - Robust Team Caching & ID Persistence (October 2025)
+
+**🔒 Team Assignment Freezing (핵심 개선):**
+- **문제:** 팀이 프레임마다 자주 변경되는 문제
+- **해결:** 각 객체에 팀 정보 캐시 및 고정 시스템 도입
+  - 같은 팀으로 5프레임 연속 분류되면 팀 영구 고정
+  - 고정된 팀은 절대 변경되지 않음 (frozen flag)
+  - 탐지 실패시에도 캐시된 팀 정보 유지
+- **결과:** 안정적인 팀 할당, 팀 변경 없음
+
+**🆔 향상된 객체 추적 (RobustTracker):**
+- 기존 SimpleTracker를 RobustTracker로 업그레이드
+- 각 객체에 고유 ID 부여 (절대 변경 안 됨)
+- IoU 매칭 임계값 완화 (0.25)
+- 최대 60프레임까지 탐지 없이 추적 유지
+- **결과:** 안정적인 ID 유지, 깜빡임 없음
+
+**⚙️ 설정 파일 분리:**
+- `tracker_config.py`로 모든 설정 분리
+- 코드 수정 없이 설정만 변경 가능
+- 팀 색상, 추적 파라미터 등 쉽게 조정
+
+**🧹 코드 정리:**
+- 사용하지 않는 CameraChangeDetector 제거
+- 모든 설정을 config 파일에서 로드
+- 더 깔끔하고 유지보수 쉬운 구조
+
 ### v2.0 - Major Pipeline Overhaul (October 2025)
 - **Complete Rewrite**: Replaced entire pipeline with consolidated, single-script architecture
 - **YOLOv8 Integration**: Implemented pre-trained YOLOv8 model for robust person detection, solving the overlapping player problem
@@ -151,9 +178,9 @@ The system implements a comprehensive multi-stage pipeline:
 
 **Configuration**: The HSV ranges are defined in the configuration section of `tracker.py` and should be adjusted based on the actual jersey colors in your footage.
 
-### Stage 3.5: Object Tracking (Maintaining Detections)
+### Stage 3.5: Robust Object Tracking with Team Freezing (RobustTracker)
 
-**Purpose**: Maintain consistent player IDs across frames and preserve tracking even when YOLO temporarily fails to detect a player.
+**Purpose**: Maintain consistent player IDs and **permanently cache team assignments** to prevent team changes across frames.
 
 **Process**:
 
@@ -161,24 +188,38 @@ The system implements a comprehensive multi-stage pipeline:
 
 2. **IoU-Based Matching**:
    - For each existing track from previous frame, calculate IoU (Intersection over Union) with all new detections
-   - Match track to detection with highest IoU above threshold (default: 0.3)
-   - Update matched tracks with new bounding box and team information
+   - Match track to detection with highest IoU above threshold (default: 0.25)
+   - Update matched tracks with new bounding box
 
-3. **Track Aging**:
+3. **Team Assignment Freezing (핵심 기능)**:
+   - **Initial Assignment**: When a player is first detected, they receive a tentative team assignment
+   - **Confidence Building**: Each time the player is classified as the same team, confidence counter increases
+   - **Permanent Freeze**: After 5 consecutive frames with the same team, the team is **permanently frozen**
+   - **Frozen State**: Once frozen, the team assignment **never changes**, even if subsequent color detection suggests otherwise
+   - **Cache Priority**: Cached team information takes absolute precedence over real-time color detection
+   - **Result**: No more team flickering or inconsistent assignments
+
+4. **Track Aging**:
    - **Matched tracks**: Reset age to 0 (fresh detection)
    - **Unmatched tracks**: Increment age by 1
-   - **Keep alive**: Tracks survive up to `max_age` frames without detection (default: 30 frames)
-   - This maintains player positions even through brief detection failures
+   - **Keep alive**: Tracks survive up to 60 frames without detection (default: 60 frames)
+   - **Team Preservation**: Even when tracking without detection, frozen team assignment is maintained
 
-4. **New Track Creation**: Unmatched detections become new tracks with unique IDs
+5. **New Track Creation**: Unmatched detections become new tracks with unique IDs
 
-5. **ID Persistence**: Each player maintains the same ID throughout the video (unless they disappear for > max_age frames)
+6. **ID Persistence**: Each player maintains the same ID throughout the video (unless they disappear for > 60 frames)
 
-**Why Tracking**: YOLO detection can occasionally fail due to occlusion, lighting changes, or players moving at field edges. The tracker maintains object continuity by "remembering" recent detections and updating their positions based on the most recent successful detection. This creates smooth, consistent visualization even when per-frame detection is imperfect.
+**Why Robust Tracking**: 
+- **Problem**: Per-frame color detection can be noisy due to lighting, shadows, and camera angles, causing team assignments to flicker
+- **Solution**: Cache and freeze team assignments after confidence is established
+- **Benefit**: Stable, consistent team identification throughout the entire video
 
-**Cookie Value Approach**: Like the homography matrix, tracks are cached and reused. When YOLO detects a player, the tracker updates the cache. When YOLO misses the player, the tracker maintains the last known position until either:
-- The player is re-detected (tracker updates)
-- Max age is exceeded (track is removed)
+**Cookie Value Approach**: 
+- **Homography**: Calculated once, reused for all frames
+- **Team Assignment**: Classified initially, frozen after confidence, cached permanently
+- **Tracking**: Maintains object continuity through detection failures
+
+The system prioritizes **cached, validated data** over real-time detection to ensure consistency and stability.
 
 ### Stage 4: Coordinate Transformation
 
@@ -711,15 +752,20 @@ Understanding player movement enables:
 
 ```
 football_tracker/
-├── tracker.py          # Complete analysis pipeline (main script, ~900 lines)
+├── tracker.py          # Complete analysis pipeline (main script, ~1100 lines)
+├── tracker_config.py   # All configuration parameters (settings file)
 ├── requirements.txt    # Python dependencies (4 packages)
 ├── README.md          # This file (complete technical documentation)
-├── GETTING_STARTED.md # Quick start guide
-└── UPDATE_COMPLETE.md # Latest features and changes
+└── GETTING_STARTED.md # Quick start guide
 ```
 
-**Input**: Place your video as `input_game.mp4` or configure INPUT_VIDEO path
-**Output**: Processed video saved as `output_analysis.mp4` with side-by-side visualization
+**Key Files**:
+- `tracker.py`: Core processing pipeline with RobustTracker and team freezing
+- `tracker_config.py`: All tunable parameters (video paths, colors, thresholds)
+- Modify `tracker_config.py` to adjust settings without touching main code
+
+**Input**: Configure `INPUT_VIDEO` in `tracker_config.py` (default: `zoomed_game.mp4`)
+**Output**: Processed video saved as `OUTPUT_VIDEO` (default: `output_analysis.mp4`)
 
 ## Technical Notes
 

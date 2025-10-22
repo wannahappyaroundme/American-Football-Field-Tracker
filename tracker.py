@@ -22,122 +22,11 @@ from ultralytics import YOLO
 from sklearn.cluster import KMeans
 import math
 from typing import Tuple, List, Optional, Dict
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-# Video paths
-INPUT_VIDEO = "zoomed_game.mp4"
-OUTPUT_VIDEO = "output_analysis.mp4"
-
-# Video output quality settings (고화질 출력)
-OUTPUT_CODEC = 'avc1'  # H.264 codec for better quality
-OUTPUT_QUALITY = 95    # Quality (0-100, higher = better)
-
-# YOLO settings
-YOLO_MODEL = "yolov8n.pt"
-YOLO_CONFIDENCE = 0.5
-
-# Stadium/Field Recognition (HSV for green field)
-ENABLE_STADIUM_MASKING = True
-FIELD_HSV_LOWER = (35, 40, 40)      # Lower bound for green field
-FIELD_HSV_UPPER = (85, 255, 255)    # Upper bound for green field
-
-# Morphological operations for field mask cleanup
-MORPH_KERNEL_SIZE = 15
-MORPH_ITERATIONS = 2
-
-# Stadium boundary detection (더 강력한 경기장 밖 제외)
-MIN_FIELD_AREA_PERCENT = 25.0    # 최소 필드 면적 (프레임의 %)
-FIELD_BOUNDARY_EROSION = 10      # 필드 경계에서 몇 픽셀 안쪽만 허용
-
-# ROI Masking (relative percentages, not absolute pixels)
-ROI_TOP_PERCENT = 0.20      # Exclude top 20% (scoreboard area)
-ROI_BOTTOM_PERCENT = 0.10   # Exclude bottom 10% (lower crowd)
-
-# Team classification - HSV color ranges (Hue, Saturation, Value)
-# Adjust these ranges based on your team's jersey colors
-TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Example: Blue jerseys
-TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))      # Example: White jerseys
-REFEREE_HSV_RANGE = ((0, 0, 0), (180, 255, 60))       # Example: Black jerseys
-
-# Team visualization colors (BGR)
-TEAM_A_COLOR = (255, 0, 0)      # Blue
-TEAM_B_COLOR = (0, 0, 255)      # Red
-REFEREE_COLOR = (0, 255, 255)   # Yellow
-UNKNOWN_COLOR = (128, 128, 128) # Gray
-
-# Top-down view settings
-FIELD_WIDTH = 400    # Pixels
-FIELD_HEIGHT = 600   # Pixels
-FIELD_LENGTH_YARDS = 120  # Including end zones
-FIELD_WIDTH_YARDS = 53.33
-
-# Tracking settings
-ENABLE_TRACKING = True           # Maintain objects when detection fails
-MAX_TRACKING_FRAMES = 30         # Max frames to track without detection
-TRACKING_IOU_THRESHOLD = 0.3     # IoU threshold for matching
-
-# Distance tracking settings
-ENABLE_DISTANCE_TRACKING = True  # Measure yards traveled per player
-YARDS_PER_PIXEL = None          # Auto-calculated from homography
-
-# Camera change detection (reset cache when camera zooms/pans)
-ENABLE_CAMERA_CHANGE_DETECTION = True
-CAMERA_CHANGE_THRESHOLD = 0.15   # MSE threshold for detecting zoom/pan
-HOMOGRAPHY_RECALC_INTERVAL = 300 # Frames between forced recalculation
-
-# Tactical map settings
-PERSISTENT_DOTS = True           # Keep dots on tactical map (don't clear)
-DOT_FADE_ALPHA = 0.98           # Fade rate for old dots (1.0 = no fade)
-
-# Team color detection (improved clustering)
-TEAM_DETECTION_METHOD = 'adaptive_clustering'  # 'adaptive_clustering' or 'fixed_ranges'
-MIN_PLAYERS_FOR_CLUSTERING = 6  # Minimum players before auto team detection
-NUM_TEAM_CLUSTERS = 3  # Number of clusters (Team A, Team B, Referee)
+import tracker_config as config  # 설정 파일 import
 
 
 # ============================================================================
-# PART 0: CAMERA CHANGE DETECTION & CACHE MANAGEMENT
-# ============================================================================
-
-class CameraChangeDetector:
-    """
-    Detects significant camera changes (zoom, pan) to trigger cache reset.
-    """
-    
-    def __init__(self, threshold=0.15):
-        """Initialize detector."""
-        self.threshold = threshold
-        self.prev_frame_gray = None
-        self.prev_homography = None
-    
-    def detect_change(self, frame):
-        """
-        Detect if camera has significantly changed.
-        
-        Returns:
-            (has_changed, change_magnitude)
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (320, 180))  # Downsample for speed
-        
-        if self.prev_frame_gray is None:
-            self.prev_frame_gray = gray
-            return True, 1.0
-        
-        # Calculate MSE
-        mse = np.mean((gray.astype(float) - self.prev_frame_gray.astype(float)) ** 2)
-        normalized_mse = mse / (255.0 ** 2)
-        
-        self.prev_frame_gray = gray
-        
-        return normalized_mse > self.threshold, normalized_mse
-
-
-# ============================================================================
-# PART 0.5: STADIUM/FIELD RECOGNITION
+# PART 0: STADIUM/FIELD RECOGNITION
 # ============================================================================
 
 def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
@@ -159,20 +48,20 @@ def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
     # Create mask for green field
-    lower_green = np.array(FIELD_HSV_LOWER)
-    upper_green = np.array(FIELD_HSV_UPPER)
+    lower_green = np.array(config.FIELD_HSV_LOWER)
+    upper_green = np.array(config.FIELD_HSV_UPPER)
     field_mask = cv2.inRange(hsv, lower_green, upper_green)
     
     # Apply morphological operations to clean up the mask
-    kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
+    kernel = np.ones((config.MORPH_KERNEL_SIZE, config.MORPH_KERNEL_SIZE), np.uint8)
     
     # Closing: Fill gaps in the field
     field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_CLOSE, kernel, 
-                                  iterations=MORPH_ITERATIONS)
+                                  iterations=config.MORPH_ITERATIONS)
     
     # Opening: Remove noise outside the field
     field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_OPEN, kernel,
-                                  iterations=MORPH_ITERATIONS)
+                                  iterations=config.MORPH_ITERATIONS)
     
     # 작은 영역 제거 - 노이즈와 경기장 밖 작은 영역 제거
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(field_mask, connectivity=8)
@@ -184,13 +73,13 @@ def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
         field_mask = np.where(labels == largest_label, 255, 0).astype(np.uint8)
     
     # 필드 경계에서 안쪽으로 침식 - 경기장 밖 사람 확실히 제외
-    erosion_kernel = np.ones((FIELD_BOUNDARY_EROSION, FIELD_BOUNDARY_EROSION), np.uint8)
+    erosion_kernel = np.ones((config.FIELD_BOUNDARY_EROSION, config.FIELD_BOUNDARY_EROSION), np.uint8)
     field_mask = cv2.erode(field_mask, erosion_kernel, iterations=1)
     
     # 최소 면적 검증
     mask_area_percent = (np.sum(field_mask > 0) / field_mask.size) * 100
-    if mask_area_percent < MIN_FIELD_AREA_PERCENT:
-        print(f"  ⚠ Warning: Field mask only covers {mask_area_percent:.1f}% (< {MIN_FIELD_AREA_PERCENT}%)")
+    if mask_area_percent < config.MIN_FIELD_AREA_PERCENT:
+        print(f"  ⚠ Warning: Field mask only covers {mask_area_percent:.1f}% (< {config.MIN_FIELD_AREA_PERCENT}%)")
     
     return field_mask
 
@@ -211,8 +100,8 @@ def apply_roi_mask(mask: np.ndarray, frame_height: int, frame_width: int) -> np.
         Modified mask with ROI applied
     """
     # Calculate boundaries based on relative percentages
-    top_boundary = int(frame_height * ROI_TOP_PERCENT)
-    bottom_boundary = int(frame_height * (1.0 - ROI_BOTTOM_PERCENT))
+    top_boundary = int(frame_height * config.ROI_TOP_PERCENT)
+    bottom_boundary = int(frame_height * (1.0 - config.ROI_BOTTOM_PERCENT))
     
     # Black out top and bottom regions
     mask[0:top_boundary, :] = 0
@@ -240,7 +129,7 @@ def create_combined_mask(frame: np.ndarray) -> np.ndarray:
     """
     height, width = frame.shape[:2]
     
-    if ENABLE_STADIUM_MASKING:
+    if config.ENABLE_STADIUM_MASKING:
         # Start with stadium/field mask
         mask = create_stadium_mask(frame)
         
@@ -400,28 +289,47 @@ def calculate_homography(first_frame: np.ndarray, mask: Optional[np.ndarray] = N
     src_points = np.float32(intersections[:num_points])
     
     # Define destination points on top-down view
-    # 교차점의 위치에 따라 적절한 필드 위치에 매핑
-    if num_points == 4:
-        # 기본 4점: 필드의 4 모서리
-        dst_points = np.float32([
-            [0, 0],                              
-            [FIELD_WIDTH, 0],                    
-            [0, FIELD_HEIGHT],                   
-            [FIELD_WIDTH, FIELD_HEIGHT]          
-        ])
-    elif num_points >= 6:
-        # 6점 이상: 더 정교한 매핑 (야드 라인 고려)
-        # 상단 2개, 중간 2-4개, 하단 2개
-        spacing_y = FIELD_HEIGHT / (num_points // 2)
-        dst_points = []
-        for i in range(num_points // 2):
-            dst_points.append([0, i * spacing_y])
-            dst_points.append([FIELD_WIDTH, i * spacing_y])
-        dst_points = np.float32(dst_points[:num_points])
+    # 실제 필드 비율을 고려한 정확한 매핑
+    print(f"  Mapping {num_points} points to tactical view...")
+    
+    # 소스 점들을 Y 좌표로 정렬 (상단부터 하단까지)
+    sorted_indices = np.argsort([pt[1] for pt in src_points])
+    sorted_src = src_points[sorted_indices]
+    
+    # 필드 비율 계산 (실제 필드는 120야드 x 53.33야드)
+    field_ratio = config.FIELD_WIDTH / config.FIELD_HEIGHT  # 400/600 = 0.67
+    
+    # 목적지 점들을 필드 전체에 균등하게 배치
+    dst_points = []
+    
+    if num_points >= 4:
+        # 4개 이상: 필드 전체 영역에 균등 분포
+        rows = max(2, int(np.sqrt(num_points)))
+        cols = max(2, (num_points + rows - 1) // rows)
+        
+        for i in range(num_points):
+            row = i // cols
+            col = i % cols
+            
+            # 필드 내부에 균등하게 배치 (경계에서 약간 안쪽)
+            margin_x = config.FIELD_WIDTH * 0.1  # 10% 마진
+            margin_y = config.FIELD_HEIGHT * 0.1
+            
+            x = margin_x + (col / max(1, cols - 1)) * (config.FIELD_WIDTH - 2 * margin_x)
+            y = margin_y + (row / max(1, rows - 1)) * (config.FIELD_HEIGHT - 2 * margin_y)
+            
+            dst_points.append([x, y])
     else:
-        # 기본값
-        spacing = FIELD_HEIGHT / (num_points - 1)
-        dst_points = np.float32([[0, i * spacing] for i in range(num_points)])
+        # 4개 미만: 중앙선을 따라 배치
+        center_x = config.FIELD_WIDTH / 2
+        spacing_y = config.FIELD_HEIGHT / (num_points + 1)
+        
+        for i in range(num_points):
+            y = spacing_y * (i + 1)
+            dst_points.append([center_x, y])
+    
+    dst_points = np.float32(dst_points)
+    print(f"  Destination points: {len(dst_points)} points across field")
     
     # Calculate homography matrix with RANSAC (outlier 제거)
     H, status = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
@@ -450,21 +358,35 @@ def calculate_homography(first_frame: np.ndarray, mask: Optional[np.ndarray] = N
 # PART 1.5: SIMPLE OBJECT TRACKING
 # ============================================================================
 
-class SimpleTracker:
+class RobustTracker:
     """
-    Simple tracker to maintain detections when YOLO fails.
-    Uses IoU matching to associate detections across frames.
+    강화된 추적 시스템 - 팀 정보 캐시 및 고정
+    
+    핵심 기능:
+    1. 각 객체에 고유 ID 부여 (절대 변경 안 됨)
+    2. 팀 정보 캐시 (한번 할당되면 고정)
+    3. 탐지 실패시에도 추적 유지 (캐시된 정보 사용)
     """
     
-    def __init__(self, max_age=30, iou_threshold=0.3):
-        """Initialize tracker."""
-        self.tracks = []  # List of active tracks
-        self.next_id = 1
+    def __init__(self, max_age=60, iou_threshold=0.25, freeze_team=True, team_confidence_frames=5):
+        """
+        Initialize robust tracker.
+        
+        Args:
+            max_age: 탐지 없이 유지할 최대 프레임
+            iou_threshold: IoU 매칭 임계값
+            freeze_team: 팀 할당 고정 여부
+            team_confidence_frames: 팀 고정까지 필요한 프레임 수
+        """
+        self.tracks = []  # 활성 추적 목록
+        self.next_id = 1  # 다음 ID (계속 증가)
         self.max_age = max_age
         self.iou_threshold = iou_threshold
+        self.freeze_team = freeze_team
+        self.team_confidence_frames = team_confidence_frames
     
     def calculate_iou(self, box1, box2):
-        """Calculate IoU between two boxes."""
+        """IoU 계산"""
         x1_1, y1_1, x2_1, y2_1 = box1
         x1_2, y1_2, x2_2, y2_2 = box2
         
@@ -484,18 +406,18 @@ class SimpleTracker:
     
     def update(self, detections):
         """
-        Update tracks with new detections.
+        추적 업데이트 - 팀 정보 캐시 및 고정
         
         Args:
             detections: List of (bbox, team_label, team_color)
             
         Returns:
-            List of tracked objects with IDs
+            List of tracked objects with frozen team assignments
         """
-        # Match detections to existing tracks
         matched_tracks = []
         unmatched_detections = list(range(len(detections)))
         
+        # 기존 추적과 새 탐지 매칭
         for track in self.tracks:
             best_iou = 0
             best_det_idx = None
@@ -508,21 +430,45 @@ class SimpleTracker:
                     best_iou = iou
                     best_det_idx = det_idx
             
-            # Match found
+            # 매칭 성공
             if best_iou >= self.iou_threshold:
+                # Bbox 업데이트
                 track['bbox'] = detections[best_det_idx][0]
-                track['team_label'] = detections[best_det_idx][1]
-                track['team_color'] = detections[best_det_idx][2]
+                
+                # 팀 정보 업데이트 (고정 로직)
+                new_team_label, new_team_color = detections[best_det_idx][1], detections[best_det_idx][2]
+                
+                if track.get('team_frozen', False):
+                    # 팀이 이미 고정됨 - 절대 바뀌지 않음!
+                    pass  # 기존 팀 유지
+                else:
+                    # 아직 고정 안 됨 - 팀 업데이트 및 신뢰도 체크
+                    if new_team_label == track.get('team_label'):
+                        # 같은 팀으로 계속 분류됨 - 신뢰도 증가
+                        track['team_confidence'] = track.get('team_confidence', 0) + 1
+                        
+                        # 충분한 신뢰도 달성 - 팀 고정!
+                        if track['team_confidence'] >= self.team_confidence_frames:
+                            track['team_frozen'] = True
+                            print(f"  → ID:{track['id']} 팀 고정: {track['team_label']}")
+                    else:
+                        # 팀이 바뀜 - 신뢰도 리셋하고 새 팀으로
+                        track['team_label'] = new_team_label
+                        track['team_color'] = new_team_color
+                        track['team_confidence'] = 1
+                
                 track['age'] = 0
+                track['hits'] = track.get('hits', 0) + 1
                 matched_tracks.append(track)
                 unmatched_detections.remove(best_det_idx)
             else:
-                # No match - age the track
+                # 매칭 실패 - age 증가 (캐시된 정보 유지)
                 track['age'] += 1
                 if track['age'] < self.max_age:
+                    # 추적 유지 (팀 정보 그대로 유지!)
                     matched_tracks.append(track)
         
-        # Create new tracks for unmatched detections
+        # 새로운 탐지에 대한 추적 생성
         for det_idx in unmatched_detections:
             bbox, team_label, team_color = detections[det_idx]
             matched_tracks.append({
@@ -530,7 +476,10 @@ class SimpleTracker:
                 'bbox': bbox,
                 'team_label': team_label,
                 'team_color': team_color,
-                'age': 0
+                'team_confidence': 1,
+                'team_frozen': False,  # 아직 고정 안 됨
+                'age': 0,
+                'hits': 1
             })
             self.next_id += 1
         
@@ -634,7 +583,7 @@ class AdaptiveTeamClassifier:
         self.min_players = min_players
         self.team_centers = None  # Cached team color centers
         self.team_labels = {0: "Team A", 1: "Team B", 2: "Referee"}
-        self.team_colors_bgr = {0: TEAM_A_COLOR, 1: TEAM_B_COLOR, 2: REFEREE_COLOR}
+        self.team_colors_bgr = {0: config.TEAM_A_COLOR, 1: config.TEAM_B_COLOR, 2: config.REFEREE_COLOR}
     
     def classify_all_players(self, player_colors):
         """
@@ -663,7 +612,7 @@ class AdaptiveTeamClassifier:
         results = []
         for label in labels:
             team_label = self.team_labels.get(label, f"Team {label}")
-            team_color = self.team_colors_bgr.get(label, UNKNOWN_COLOR)
+            team_color = self.team_colors_bgr.get(label, config.UNKNOWN_COLOR)
             results.append((team_label, team_color))
         
         return results
@@ -682,21 +631,21 @@ def classify_team_fixed(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int
     h, s, v = hsv_color
     
     # Check Team A range
-    (h_min_a, s_min_a, v_min_a), (h_max_a, s_max_a, v_max_a) = TEAM_A_HSV_RANGE
+    (h_min_a, s_min_a, v_min_a), (h_max_a, s_max_a, v_max_a) = config.TEAM_A_HSV_RANGE
     if h_min_a <= h <= h_max_a and s_min_a <= s <= s_max_a and v_min_a <= v <= v_max_a:
-        return "Team A", TEAM_A_COLOR
+        return "Team A", config.TEAM_A_COLOR
     
     # Check Team B range
-    (h_min_b, s_min_b, v_min_b), (h_max_b, s_max_b, v_max_b) = TEAM_B_HSV_RANGE
+    (h_min_b, s_min_b, v_min_b), (h_max_b, s_max_b, v_max_b) = config.TEAM_B_HSV_RANGE
     if h_min_b <= h <= h_max_b and s_min_b <= s <= s_max_b and v_min_b <= v <= v_max_b:
-        return "Team B", TEAM_B_COLOR
+        return "Team B", config.TEAM_B_COLOR
     
     # Check Referee range
-    (h_min_r, s_min_r, v_min_r), (h_max_r, s_max_r, v_max_r) = REFEREE_HSV_RANGE
+    (h_min_r, s_min_r, v_min_r), (h_max_r, s_max_r, v_max_r) = config.REFEREE_HSV_RANGE
     if h_min_r <= h <= h_max_r and s_min_r <= s <= s_max_r and v_min_r <= v <= v_max_r:
-        return "Referee", REFEREE_COLOR
+        return "Referee", config.REFEREE_COLOR
     
-    return "Unknown", UNKNOWN_COLOR
+    return "Unknown", config.UNKNOWN_COLOR
 
 
 # ============================================================================
@@ -711,27 +660,27 @@ def create_field_template() -> np.ndarray:
         Field image with yard lines drawn
     """
     # Create green field
-    field = np.zeros((FIELD_HEIGHT, FIELD_WIDTH, 3), dtype=np.uint8)
+    field = np.zeros((config.FIELD_HEIGHT, config.FIELD_WIDTH, 3), dtype=np.uint8)
     field[:, :] = (34, 139, 34)  # Green
     
     # Draw yard lines every 10 yards
-    yards_per_pixel = FIELD_HEIGHT / FIELD_LENGTH_YARDS
+    yards_per_pixel = config.FIELD_HEIGHT / config.FIELD_LENGTH_YARDS
     
-    for yard in range(0, FIELD_LENGTH_YARDS + 1, 10):
+    for yard in range(0, config.FIELD_LENGTH_YARDS + 1, 10):
         y = int(yard * yards_per_pixel)
-        cv2.line(field, (0, y), (FIELD_WIDTH, y), (255, 255, 255), 2)
+        cv2.line(field, (0, y), (config.FIELD_WIDTH, y), (255, 255, 255), 2)
         
         # Add yard number
-        if 0 < yard < FIELD_LENGTH_YARDS:
+        if 0 < yard < config.FIELD_LENGTH_YARDS:
             cv2.putText(field, str(yard), (10, y - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     # Draw sidelines
-    cv2.rectangle(field, (0, 0), (FIELD_WIDTH - 1, FIELD_HEIGHT - 1),
+    cv2.rectangle(field, (0, 0), (config.FIELD_WIDTH - 1, config.FIELD_HEIGHT - 1),
                  (255, 255, 255), 3)
     
     # Add title
-    cv2.putText(field, "TACTICAL VIEW", (FIELD_WIDTH // 2 - 60, 30),
+    cv2.putText(field, "TACTICAL VIEW", (config.FIELD_WIDTH // 2 - 60, 30),
                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     return field
@@ -761,8 +710,8 @@ def transform_point_to_topdown(point: Tuple[float, float],
     x, y = transformed[0][0]
     
     # Clip to field bounds
-    x = np.clip(x, 0, FIELD_WIDTH - 1)
-    y = np.clip(y, 0, FIELD_HEIGHT - 1)
+    x = np.clip(x, 0, config.FIELD_WIDTH - 1)
+    y = np.clip(y, 0, config.FIELD_HEIGHT - 1)
     
     return (int(x), int(y))
 
@@ -780,11 +729,11 @@ def process_video():
     print("="*70)
     
     # Step 1: Load video
-    print(f"\n[1/6] Loading video: {INPUT_VIDEO}")
-    cap = cv2.VideoCapture(INPUT_VIDEO)
+    print(f"\n[1/6] Loading video: {config.INPUT_VIDEO}")
+    cap = cv2.VideoCapture(config.INPUT_VIDEO)
     
     if not cap.isOpened():
-        print(f"ERROR: Cannot open video file: {INPUT_VIDEO}")
+        print(f"ERROR: Cannot open video file: {config.INPUT_VIDEO}")
         return
     
     # Get video properties
@@ -796,8 +745,8 @@ def process_video():
     print(f"  ✓ Video loaded: {width}x{height} @ {fps:.1f} FPS, {total_frames} frames")
     
     # Step 2: Load YOLO model
-    print(f"\n[2/6] Loading YOLOv8 model: {YOLO_MODEL}")
-    model = YOLO(YOLO_MODEL)
+    print(f"\n[2/6] Loading YOLOv8 model: {config.YOLO_MODEL}")
+    model = YOLO(config.YOLO_MODEL)
     print("  ✓ Model loaded successfully")
     
     # Step 3: Analyze first frame and create stadium mask
@@ -835,40 +784,46 @@ def process_video():
     print("  ✓ Field template created")
     
     # Step 6: Setup video writer
-    print(f"\n[6/6] Setting up output video: {OUTPUT_VIDEO}")
+    print(f"\n[6/6] Setting up output video: {config.OUTPUT_VIDEO}")
     
     # Output dimensions: side-by-side (original + tactical)
-    output_width = width + FIELD_WIDTH
-    output_height = max(height, FIELD_HEIGHT)
+    output_width = width + config.FIELD_WIDTH
+    output_height = max(height, config.FIELD_HEIGHT)
     
     # 고품질 비디오 출력 설정
-    fourcc = cv2.VideoWriter_fourcc(*OUTPUT_CODEC)
-    out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (output_width, output_height))
+    fourcc = cv2.VideoWriter_fourcc(*config.OUTPUT_CODEC)
+    out = cv2.VideoWriter(config.OUTPUT_VIDEO, fourcc, fps, (output_width, output_height))
     
     # VideoWriter 파라미터 설정 (품질 향상)
-    if OUTPUT_CODEC == 'avc1':  # H.264
+    if config.OUTPUT_CODEC == 'avc1':  # H.264
         # 더 높은 비트레이트로 설정 가능
         print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS (H.264 codec, high quality)")
     else:
         print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS")
     
-    # Initialize tracker for maintaining detections
-    print("\n[TRACKING] Initializing object tracker...")
-    tracker = SimpleTracker(max_age=MAX_TRACKING_FRAMES, iou_threshold=TRACKING_IOU_THRESHOLD) if ENABLE_TRACKING else None
+    # Initialize robust tracker with team freezing
+    print("\n[TRACKING] Initializing robust object tracker with team caching...")
+    tracker = RobustTracker(
+        max_age=config.MAX_TRACKING_FRAMES,
+        iou_threshold=config.TRACKING_IOU_THRESHOLD,
+        freeze_team=config.FREEZE_TEAM_ASSIGNMENT,
+        team_confidence_frames=config.TEAM_ASSIGNMENT_CONFIDENCE
+    ) if config.ENABLE_TRACKING else None
     if tracker:
-        print("  ✓ Tracker enabled - maintains objects when YOLO detection fails")
+        print("  ✓ Tracker enabled - maintains IDs and FREEZES team assignments")
+        print(f"  ✓ Team freeze after {config.TEAM_ASSIGNMENT_CONFIDENCE} consistent frames")
     
     # Initialize adaptive team classifier
     print("\n[TEAM CLASSIFICATION] Initializing adaptive team classifier...")
-    team_classifier = AdaptiveTeamClassifier(n_clusters=NUM_TEAM_CLUSTERS, min_players=MIN_PLAYERS_FOR_CLUSTERING)
+    team_classifier = AdaptiveTeamClassifier(n_clusters=config.NUM_TEAM_CLUSTERS, min_players=config.MIN_PLAYERS_FOR_CLUSTERING)
     print("  ✓ Adaptive clustering enabled - groups similar shirt colors into teams")
     
     # Create persistent tactical map (dots stay visible, no blinking)
     # FIXED: Keep field template separate so it doesn't fade!
     print("\n[TACTICAL MAP] Setting up persistent tactical display...")
-    if PERSISTENT_DOTS:
+    if config.PERSISTENT_DOTS:
         # Create dots layer separate from field template
-        dots_layer = np.zeros((FIELD_HEIGHT, FIELD_WIDTH, 3), dtype=np.float32)
+        dots_layer = np.zeros((config.FIELD_HEIGHT, config.FIELD_WIDTH, 3), dtype=np.float32)
         print("  ✓ Persistent mode - dots accumulate on separate layer (field stays clear)")
     else:
         dots_layer = None
@@ -879,10 +834,10 @@ def process_video():
     print(f"  PROCESSING {total_frames} FRAMES")
     print("="*70)
     print("  Homography: CACHED (calculated once, reused for all frames)")
-    print("  Stadium masking: ENABLED" if ENABLE_STADIUM_MASKING else "  Stadium masking: DISABLED")
-    print(f"  ROI: Excluding top {ROI_TOP_PERCENT*100:.0f}% and bottom {ROI_BOTTOM_PERCENT*100:.0f}%")
-    print("  Tracking: ENABLED - maintains IDs across frames" if ENABLE_TRACKING else "  Tracking: DISABLED")
-    print("  Tactical dots: PERSISTENT - no blinking" if PERSISTENT_DOTS else "  Tactical dots: REFRESH each frame")
+    print("  Stadium masking: ENABLED" if config.ENABLE_STADIUM_MASKING else "  Stadium masking: DISABLED")
+    print(f"  ROI: Excluding top {config.ROI_TOP_PERCENT*100:.0f}% and bottom {config.ROI_BOTTOM_PERCENT*100:.0f}%")
+    print("  Tracking: ENABLED - maintains IDs across frames" if config.ENABLE_TRACKING else "  Tracking: DISABLED")
+    print("  Tactical dots: PERSISTENT - no blinking" if config.PERSISTENT_DOTS else "  Tactical dots: REFRESH each frame")
     print("  Priority: Accuracy over speed (offline analysis)")
     print()
     
@@ -916,7 +871,7 @@ def process_video():
         # ====================================================================
         
         # Run YOLO on masked frame - only detects players on the field
-        results = model(masked_frame, verbose=False, conf=YOLO_CONFIDENCE)
+        results = model(masked_frame, verbose=False, conf=config.YOLO_CONFIDENCE)
         
         # ====================================================================
         # COLLECT ALL DETECTIONS AND EXTRACT COLORS
@@ -924,6 +879,7 @@ def process_video():
         
         detections_raw = []  # Collect bboxes first
         player_colors = []   # Collect all colors for adaptive clustering
+        ball_detections = [] # Collect ball detections
         
         # First pass: collect all detections and extract jersey colors
         for result in results:
@@ -931,14 +887,14 @@ def process_video():
                 continue
             
             for box in result.boxes:
-                # Only process 'person' class (class 0 in COCO)
-                if int(box.cls[0]) != 0:
-                    continue
+                class_id = int(box.cls[0])
                 
-                # Get bounding box
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                conf = float(box.conf[0])
+                # Process 'person' class (class 0) and 'sports ball' class (class 32)
+                if class_id == 0:  # Person
+                    # Get bounding box
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    conf = float(box.conf[0])
                 
                 # ============================================================
                 # VERIFY DETECTION IS WITHIN STADIUM MASK (강화된 검증)
@@ -984,6 +940,27 @@ def process_video():
                 if dominant_color_hsv is not None:
                     detections_raw.append((x1, y1, x2, y2, conf))
                     player_colors.append(dominant_color_hsv)
+                
+                elif class_id == 32 and config.ENABLE_BALL_DETECTION:  # Sports ball (football)
+                    # Get bounding box for ball
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    conf = float(box.conf[0])
+                    
+                    # Check confidence threshold for ball
+                    if conf < config.BALL_CONFIDENCE:
+                        continue
+                    
+                    # Check if ball is on field (simpler check for ball)
+                    center_x = int((x1 + x2) / 2)
+                    center_y = int((y1 + y2) / 2)
+                    
+                    if (0 <= center_x < stadium_mask.shape[1] and 
+                        0 <= center_y < stadium_mask.shape[0] and
+                        stadium_mask[center_y, center_x] > 0):
+                        
+                        ball_detections.append((x1, y1, x2, y2, conf))
+                        print(f"  🏈 Ball detected at ({center_x}, {center_y}) with confidence {conf:.2f}")
         
         # ====================================================================
         # ADAPTIVE TEAM CLASSIFICATION - Cluster all players together
@@ -993,7 +970,7 @@ def process_video():
         
         if len(player_colors) > 0:
             # Use adaptive clustering to classify all players at once
-            if TEAM_DETECTION_METHOD == 'adaptive_clustering':
+            if config.TEAM_DETECTION_METHOD == 'adaptive_clustering':
                 team_classifications = team_classifier.classify_all_players(player_colors)
             else:
                 team_classifications = [classify_team_fixed(color) for color in player_colors]
@@ -1022,9 +999,9 @@ def process_video():
         topdown_view = field_template.copy()
         
         # If persistent dots enabled, fade and overlay the dots layer
-        if PERSISTENT_DOTS and dots_layer is not None:
+        if config.PERSISTENT_DOTS and dots_layer is not None:
             # Fade old dots only (not the field!)
-            dots_layer = dots_layer * DOT_FADE_ALPHA
+            dots_layer = dots_layer * config.DOT_FADE_ALPHA
             
             # Add faded dots to fresh field template
             mask = (dots_layer > 0).any(axis=2).astype(np.uint8) * 255
@@ -1082,9 +1059,44 @@ def process_video():
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                 
                 # Also draw on dots layer for persistence
-                if PERSISTENT_DOTS and dots_layer is not None:
+                if config.PERSISTENT_DOTS and dots_layer is not None:
                     cv2.circle(dots_layer, topdown_point, 6, box_color, -1)
                     cv2.circle(dots_layer, topdown_point, 7, (0, 0, 0), 1)
+        
+        # ====================================================================
+        # DRAW FOOTBALL BALL DETECTIONS
+        # ====================================================================
+        
+        for ball_bbox in ball_detections:
+            x1, y1, x2, y2, conf = ball_bbox
+            
+            # Draw ball on original frame
+            ball_color = config.BALL_COLOR  # Ball color from config
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), ball_color, 3)
+            
+            # Ball label
+            ball_label = f"🏈 Ball ({conf:.2f})"
+            (text_w, text_h), _ = cv2.getTextSize(ball_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(annotated_frame, (x1, y1 - text_h - 10), 
+                         (x1 + text_w + 10, y1), ball_color, -1)
+            cv2.putText(annotated_frame, ball_label, (x1 + 5, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            # Transform ball position to tactical view
+            ball_center = ((x1 + x2) / 2, (y1 + y2) / 2)
+            ball_topdown = transform_point_to_topdown(ball_center, homography_matrix)
+            
+            if ball_topdown is not None:
+                # Draw ball on tactical view
+                cv2.circle(topdown_view, ball_topdown, 8, ball_color, -1)
+                cv2.circle(topdown_view, ball_topdown, 9, (0, 0, 0), 2)
+                cv2.putText(topdown_view, "🏈", (ball_topdown[0] - 6, ball_topdown[1] + 3),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+                
+                # Also draw on dots layer for persistence
+                if config.PERSISTENT_DOTS and dots_layer is not None:
+                    cv2.circle(dots_layer, ball_topdown, 8, ball_color, -1)
+                    cv2.circle(dots_layer, ball_topdown, 9, (0, 0, 0), 2)
         
         # ====================================================================
         # CREATE SIDE-BY-SIDE OUTPUT
@@ -1092,7 +1104,7 @@ def process_video():
         
         # Resize tactical view to match frame height if needed
         if topdown_view.shape[0] != height:
-            topdown_resized = cv2.resize(topdown_view, (FIELD_WIDTH, height))
+            topdown_resized = cv2.resize(topdown_view, (config.FIELD_WIDTH, height))
         else:
             topdown_resized = topdown_view
         
@@ -1120,9 +1132,9 @@ def process_video():
     print(f"\n{'='*70}")
     print("  ANALYSIS COMPLETE")
     print("="*70)
-    print(f"\nOutput saved to: {OUTPUT_VIDEO}")
+    print(f"\nOutput saved to: {config.OUTPUT_VIDEO}")
     print(f"Total frames processed: {frame_count}")
-    print(f"\nOpen {OUTPUT_VIDEO} to view the analysis.")
+    print(f"\nOpen {config.OUTPUT_VIDEO} to view the analysis.")
     print("\nFeatures in output:")
     print("  • Left side: Original video with team-colored bounding boxes")
     print("  • Right side: Top-down tactical view showing player positions")
