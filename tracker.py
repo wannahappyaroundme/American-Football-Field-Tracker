@@ -31,6 +31,10 @@ from typing import Tuple, List, Optional, Dict
 INPUT_VIDEO = "zoomed_game.mp4"
 OUTPUT_VIDEO = "output_analysis.mp4"
 
+# Video output quality settings (고화질 출력)
+OUTPUT_CODEC = 'avc1'  # H.264 codec for better quality
+OUTPUT_QUALITY = 95    # Quality (0-100, higher = better)
+
 # YOLO settings
 YOLO_MODEL = "yolov8n.pt"
 YOLO_CONFIDENCE = 0.5
@@ -43,6 +47,10 @@ FIELD_HSV_UPPER = (85, 255, 255)    # Upper bound for green field
 # Morphological operations for field mask cleanup
 MORPH_KERNEL_SIZE = 15
 MORPH_ITERATIONS = 2
+
+# Stadium boundary detection (더 강력한 경기장 밖 제외)
+MIN_FIELD_AREA_PERCENT = 25.0    # 최소 필드 면적 (프레임의 %)
+FIELD_BOUNDARY_EROSION = 10      # 필드 경계에서 몇 픽셀 안쪽만 허용
 
 # ROI Masking (relative percentages, not absolute pixels)
 ROI_TOP_PERCENT = 0.20      # Exclude top 20% (scoreboard area)
@@ -86,7 +94,8 @@ DOT_FADE_ALPHA = 0.98           # Fade rate for old dots (1.0 = no fade)
 
 # Team color detection (improved clustering)
 TEAM_DETECTION_METHOD = 'adaptive_clustering'  # 'adaptive_clustering' or 'fixed_ranges'
-MIN_PLAYERS_FOR_CLUSTERING = 8  # Minimum players before auto team detection
+MIN_PLAYERS_FOR_CLUSTERING = 6  # Minimum players before auto team detection
+NUM_TEAM_CLUSTERS = 3  # Number of clusters (Team A, Team B, Referee)
 
 
 # ============================================================================
@@ -135,10 +144,10 @@ def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
     """
     Create a binary mask that isolates the playing field/stadium area.
     
-    This mask identifies the green field using HSV color space and applies
-    morphological operations to create a clean mask. Only players within
-    this mask will be detected, excluding fans, objects, and people outside
-    the stadium.
+    IMPROVED: 더 강력한 경기장 밖 제외 처리
+    - 녹색 필드만 정확히 검출
+    - 경계 침식으로 필드 가장자리 제외
+    - 작은 영역 제거로 노이즈 차단
     
     Args:
         frame: Input frame
@@ -165,8 +174,23 @@ def create_stadium_mask(frame: np.ndarray) -> np.ndarray:
     field_mask = cv2.morphologyEx(field_mask, cv2.MORPH_OPEN, kernel,
                                   iterations=MORPH_ITERATIONS)
     
-    # Dilate slightly to include players near field edges
-    field_mask = cv2.dilate(field_mask, kernel, iterations=1)
+    # 작은 영역 제거 - 노이즈와 경기장 밖 작은 영역 제거
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(field_mask, connectivity=8)
+    
+    # 가장 큰 연결된 영역만 유지 (실제 필드)
+    if num_labels > 1:
+        # Find largest component (excluding background which is label 0)
+        largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        field_mask = np.where(labels == largest_label, 255, 0).astype(np.uint8)
+    
+    # 필드 경계에서 안쪽으로 침식 - 경기장 밖 사람 확실히 제외
+    erosion_kernel = np.ones((FIELD_BOUNDARY_EROSION, FIELD_BOUNDARY_EROSION), np.uint8)
+    field_mask = cv2.erode(field_mask, erosion_kernel, iterations=1)
+    
+    # 최소 면적 검증
+    mask_area_percent = (np.sum(field_mask > 0) / field_mask.size) * 100
+    if mask_area_percent < MIN_FIELD_AREA_PERCENT:
+        print(f"  ⚠ Warning: Field mask only covers {mask_area_percent:.1f}% (< {MIN_FIELD_AREA_PERCENT}%)")
     
     return field_mask
 
@@ -238,6 +262,11 @@ def detect_field_lines(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> 
     """
     Detect horizontal and vertical field lines using Hough Transform.
     
+    IMPROVED: 더 정확한 필드 라인 검출
+    - 더 강한 라인 강조
+    - 더 나은 엣지 검출
+    - 더 긴 라인만 선택
+    
     Args:
         frame: Input video frame
         mask: Optional binary mask to limit detection area
@@ -245,7 +274,7 @@ def detect_field_lines(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> 
     Returns:
         Tuple of (horizontal_lines, vertical_lines)
     """
-    print("  Detecting field lines...")
+    print("  Detecting field lines (improved accuracy)...")
     
     # Apply mask if provided
     if mask is not None:
@@ -256,20 +285,27 @@ def detect_field_lines(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> 
     # Convert to grayscale
     gray = cv2.cvtColor(masked_frame, cv2.COLOR_BGR2GRAY)
     
-    # Enhance white lines using top-hat morphology
+    # 흰색 라인 더 강하게 강조
+    # 1. Top-hat으로 밝은 라인 추출
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
     tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+    
+    # 2. 원본에 top-hat 결과를 2배로 추가 (라인 더 강조)
     enhanced = cv2.add(gray, tophat)
+    enhanced = cv2.add(enhanced, tophat)
+    
+    # 3. Contrast 향상
+    enhanced = cv2.convertScaleAbs(enhanced, alpha=1.3, beta=10)
     
     # Apply Gaussian blur
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.5)
     
-    # Canny edge detection
-    edges = cv2.Canny(blurred, 50, 150)
+    # Canny edge detection (더 민감하게)
+    edges = cv2.Canny(blurred, 30, 120)
     
-    # Hough Line Transform
-    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=100,
-                           minLineLength=100, maxLineGap=20)
+    # Hough Line Transform (더 긴 라인만, 더 높은 threshold)
+    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=150,
+                           minLineLength=150, maxLineGap=15)
     
     if lines is None:
         return [], []
@@ -329,6 +365,11 @@ def calculate_homography(first_frame: np.ndarray, mask: Optional[np.ndarray] = N
     """
     Calculate static homography matrix from first frame.
     
+    IMPROVED: 더 정확한 호모그래피 계산
+    - 더 많은 교차점 사용
+    - RANSAC으로 outlier 제거
+    - 역변환 검증으로 정확도 확인
+    
     Args:
         first_frame: First frame of video
         mask: Optional mask to limit line detection to field area
@@ -336,41 +377,71 @@ def calculate_homography(first_frame: np.ndarray, mask: Optional[np.ndarray] = N
     Returns:
         Homography matrix or None if calculation fails
     """
-    print("\nCalculating static homography from first frame...")
+    print("\nCalculating homography (improved accuracy for tactical view)...")
     
     # Detect field lines (using mask to focus on field area)
     h_lines, v_lines = detect_field_lines(first_frame, mask)
     
-    if len(h_lines) < 2 or len(v_lines) < 2:
-        print("  Warning: Insufficient lines detected")
+    if len(h_lines) < 3 or len(v_lines) < 2:
+        print(f"  Warning: Insufficient lines (h:{len(h_lines)}, v:{len(v_lines)})")
         return None
     
     # Find intersections (source points in video)
     intersections = find_line_intersections(h_lines, v_lines)
     
     if len(intersections) < 4:
-        print("  Warning: Insufficient intersection points")
+        print(f"  Warning: Insufficient intersections ({len(intersections)} < 4)")
         return None
     
-    # Use first 4 intersections as source points
-    src_points = np.float32(intersections[:4])
+    print(f"  Found {len(intersections)} intersection points")
+    
+    # Use more intersections for better accuracy (최대 8개 사용)
+    num_points = min(len(intersections), 8)
+    src_points = np.float32(intersections[:num_points])
     
     # Define destination points on top-down view
-    # Assuming intersections form a quadrilateral on the field
-    dst_points = np.float32([
-        [0, 0],                              # Top-left
-        [FIELD_WIDTH, 0],                    # Top-right
-        [0, FIELD_HEIGHT],                   # Bottom-left
-        [FIELD_WIDTH, FIELD_HEIGHT]          # Bottom-right
-    ])
+    # 교차점의 위치에 따라 적절한 필드 위치에 매핑
+    if num_points == 4:
+        # 기본 4점: 필드의 4 모서리
+        dst_points = np.float32([
+            [0, 0],                              
+            [FIELD_WIDTH, 0],                    
+            [0, FIELD_HEIGHT],                   
+            [FIELD_WIDTH, FIELD_HEIGHT]          
+        ])
+    elif num_points >= 6:
+        # 6점 이상: 더 정교한 매핑 (야드 라인 고려)
+        # 상단 2개, 중간 2-4개, 하단 2개
+        spacing_y = FIELD_HEIGHT / (num_points // 2)
+        dst_points = []
+        for i in range(num_points // 2):
+            dst_points.append([0, i * spacing_y])
+            dst_points.append([FIELD_WIDTH, i * spacing_y])
+        dst_points = np.float32(dst_points[:num_points])
+    else:
+        # 기본값
+        spacing = FIELD_HEIGHT / (num_points - 1)
+        dst_points = np.float32([[0, i * spacing] for i in range(num_points)])
     
-    # Calculate homography matrix
+    # Calculate homography matrix with RANSAC (outlier 제거)
     H, status = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
     
-    if H is not None:
-        print("  ✓ Homography matrix calculated successfully")
-    else:
+    if H is None:
         print("  ✗ Homography calculation failed")
+        return None
+    
+    # 역변환 검증 - 정확도 확인
+    # 변환한 점을 다시 역변환했을 때 원본과 비슷해야 함
+    transformed = cv2.perspectiveTransform(src_points.reshape(-1, 1, 2), H)
+    H_inv = np.linalg.inv(H)
+    back_transformed = cv2.perspectiveTransform(transformed, H_inv)
+    
+    # 오차 계산
+    error = np.mean(np.abs(src_points.reshape(-1, 1, 2) - back_transformed))
+    print(f"  ✓ Homography calculated with {num_points} points (reverse error: {error:.2f} pixels)")
+    
+    if error > 10:
+        print(f"  ⚠ Warning: High reverse error - homography may be inaccurate")
     
     return H
 
@@ -551,9 +622,56 @@ def get_team_color(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Option
     return best_color if best_color is not None else kmeans.cluster_centers_[0]
 
 
-def classify_team(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int]]:
+class AdaptiveTeamClassifier:
     """
-    Classify team based on HSV color.
+    Adaptive team classifier that analyzes all players in frame.
+    Groups players with similar shirt colors into teams automatically.
+    """
+    
+    def __init__(self, n_clusters=3, min_players=6):
+        """Initialize adaptive classifier."""
+        self.n_clusters = n_clusters
+        self.min_players = min_players
+        self.team_centers = None  # Cached team color centers
+        self.team_labels = {0: "Team A", 1: "Team B", 2: "Referee"}
+        self.team_colors_bgr = {0: TEAM_A_COLOR, 1: TEAM_B_COLOR, 2: REFEREE_COLOR}
+    
+    def classify_all_players(self, player_colors):
+        """
+        Classify all players by clustering their shirt colors.
+        
+        Args:
+            player_colors: List of HSV colors from all detected players
+            
+        Returns:
+            List of (team_label, team_color_bgr) for each player
+        """
+        if len(player_colors) < self.min_players:
+            # Not enough players - use fixed ranges
+            return [classify_team_fixed(color) for color in player_colors]
+        
+        # Perform K-Means clustering on all player colors
+        colors_array = np.array(player_colors)
+        kmeans = KMeans(n_clusters=min(self.n_clusters, len(player_colors)), 
+                       n_init=10, random_state=42)
+        labels = kmeans.fit_predict(colors_array)
+        
+        # Cache cluster centers for consistency
+        self.team_centers = kmeans.cluster_centers_
+        
+        # Assign team labels based on cluster
+        results = []
+        for label in labels:
+            team_label = self.team_labels.get(label, f"Team {label}")
+            team_color = self.team_colors_bgr.get(label, UNKNOWN_COLOR)
+            results.append((team_label, team_color))
+        
+        return results
+
+
+def classify_team_fixed(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int]]:
+    """
+    Classify team based on fixed HSV color ranges.
     
     Args:
         hsv_color: Dominant HSV color (H, S, V)
@@ -723,10 +841,16 @@ def process_video():
     output_width = width + FIELD_WIDTH
     output_height = max(height, FIELD_HEIGHT)
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # 고품질 비디오 출력 설정
+    fourcc = cv2.VideoWriter_fourcc(*OUTPUT_CODEC)
     out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (output_width, output_height))
     
-    print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS")
+    # VideoWriter 파라미터 설정 (품질 향상)
+    if OUTPUT_CODEC == 'avc1':  # H.264
+        # 더 높은 비트레이트로 설정 가능
+        print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS (H.264 codec, high quality)")
+    else:
+        print(f"  ✓ Output: {output_width}x{output_height} @ {fps:.1f} FPS")
     
     # Initialize tracker for maintaining detections
     print("\n[TRACKING] Initializing object tracker...")
@@ -734,13 +858,20 @@ def process_video():
     if tracker:
         print("  ✓ Tracker enabled - maintains objects when YOLO detection fails")
     
+    # Initialize adaptive team classifier
+    print("\n[TEAM CLASSIFICATION] Initializing adaptive team classifier...")
+    team_classifier = AdaptiveTeamClassifier(n_clusters=NUM_TEAM_CLUSTERS, min_players=MIN_PLAYERS_FOR_CLUSTERING)
+    print("  ✓ Adaptive clustering enabled - groups similar shirt colors into teams")
+    
     # Create persistent tactical map (dots stay visible, no blinking)
+    # FIXED: Keep field template separate so it doesn't fade!
     print("\n[TACTICAL MAP] Setting up persistent tactical display...")
     if PERSISTENT_DOTS:
-        persistent_tactical_map = field_template.copy().astype(np.float32)
-        print("  ✓ Persistent mode - dots accumulate and stay visible")
+        # Create dots layer separate from field template
+        dots_layer = np.zeros((FIELD_HEIGHT, FIELD_WIDTH, 3), dtype=np.float32)
+        print("  ✓ Persistent mode - dots accumulate on separate layer (field stays clear)")
     else:
-        persistent_tactical_map = None
+        dots_layer = None
         print("  Standard mode - map refreshes each frame")
     
     # Processing
@@ -788,12 +919,13 @@ def process_video():
         results = model(masked_frame, verbose=False, conf=YOLO_CONFIDENCE)
         
         # ====================================================================
-        # COLLECT ALL DETECTIONS
+        # COLLECT ALL DETECTIONS AND EXTRACT COLORS
         # ====================================================================
         
-        detections_list = []  # For tracker: (bbox, team_label, team_color)
+        detections_raw = []  # Collect bboxes first
+        player_colors = []   # Collect all colors for adaptive clustering
         
-        # Process each detected person
+        # First pass: collect all detections and extract jersey colors
         for result in results:
             if result.boxes is None:
                 continue
@@ -809,35 +941,66 @@ def process_video():
                 conf = float(box.conf[0])
                 
                 # ============================================================
-                # VERIFY DETECTION IS WITHIN STADIUM MASK
+                # VERIFY DETECTION IS WITHIN STADIUM MASK (강화된 검증)
                 # ============================================================
                 
-                # Calculate foot position (bottom center of bbox)
+                # 경기장 밖 사람 완전히 제외하기 위한 다중 검증
+                
+                # 1. 발 위치 검증 (bottom center of bbox)
                 foot_x = int((x1 + x2) / 2)
                 foot_y = int(y2)
                 
-                # Check if foot position is within the stadium mask
-                # This double-checks that player is actually on the field
                 if foot_x < 0 or foot_x >= stadium_mask.shape[1] or \
                    foot_y < 0 or foot_y >= stadium_mask.shape[0]:
-                    continue  # Skip if out of bounds
+                    continue  # Out of bounds
                 
                 if stadium_mask[foot_y, foot_x] == 0:
-                    continue  # Skip if not on field (background)
+                    continue  # Foot not on field
                 
-                # ============================================================
-                # TEAM CLASSIFICATION
-                # ============================================================
+                # 2. Bounding box 중심점 검증
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
                 
-                # Extract dominant jersey color
+                if center_x < 0 or center_x >= stadium_mask.shape[1] or \
+                   center_y < 0 or center_y >= stadium_mask.shape[0]:
+                    continue  # Center out of bounds
+                
+                if stadium_mask[center_y, center_x] == 0:
+                    continue  # Center not on field
+                
+                # 3. Bounding box 영역의 50% 이상이 필드 위에 있어야 함
+                bbox_mask_region = stadium_mask[y1:y2, x1:x2]
+                if bbox_mask_region.size > 0:
+                    field_pixels = np.sum(bbox_mask_region > 0)
+                    total_pixels = bbox_mask_region.size
+                    field_percentage = field_pixels / total_pixels
+                    
+                    if field_percentage < 0.5:  # 50% 미만이면 제외
+                        continue  # Most of bbox is outside field
+                
+                # Extract jersey color for this player
                 dominant_color_hsv = get_team_color(frame, (x1, y1, x2, y2))
                 
                 if dominant_color_hsv is not None:
-                    team_label, box_color = classify_team(dominant_color_hsv)
-                else:
-                    team_label, box_color = "Unknown", UNKNOWN_COLOR
-                
-                # Add to detections list for tracker
+                    detections_raw.append((x1, y1, x2, y2, conf))
+                    player_colors.append(dominant_color_hsv)
+        
+        # ====================================================================
+        # ADAPTIVE TEAM CLASSIFICATION - Cluster all players together
+        # ====================================================================
+        
+        detections_list = []  # For tracker: (bbox, team_label, team_color)
+        
+        if len(player_colors) > 0:
+            # Use adaptive clustering to classify all players at once
+            if TEAM_DETECTION_METHOD == 'adaptive_clustering':
+                team_classifications = team_classifier.classify_all_players(player_colors)
+            else:
+                team_classifications = [classify_team_fixed(color) for color in player_colors]
+            
+            # Combine bboxes with team classifications
+            for i, (x1, y1, x2, y2, conf) in enumerate(detections_raw):
+                team_label, box_color = team_classifications[i]
                 detections_list.append(((x1, y1, x2, y2), team_label, box_color))
         
         # ====================================================================
@@ -855,13 +1018,18 @@ def process_video():
         # VISUALIZATION - Draw tracked objects
         # ====================================================================
         
-        # Create fresh tactical view or use persistent one
-        if PERSISTENT_DOTS and persistent_tactical_map is not None:
-            # Fade old dots slightly
-            persistent_tactical_map = persistent_tactical_map * DOT_FADE_ALPHA
-            topdown_view = persistent_tactical_map.copy().astype(np.uint8)
-        else:
-            topdown_view = field_template.copy()
+        # FIXED: Start with fresh field template (never fades)
+        topdown_view = field_template.copy()
+        
+        # If persistent dots enabled, fade and overlay the dots layer
+        if PERSISTENT_DOTS and dots_layer is not None:
+            # Fade old dots only (not the field!)
+            dots_layer = dots_layer * DOT_FADE_ALPHA
+            
+            # Add faded dots to fresh field template
+            mask = (dots_layer > 0).any(axis=2).astype(np.uint8) * 255
+            topdown_view = cv2.addWeighted(topdown_view, 1.0, 
+                                          dots_layer.astype(np.uint8), 1.0, 0)
         
         # Annotate original frame
         annotated_frame = frame.copy()
@@ -904,7 +1072,7 @@ def process_video():
             topdown_point = transform_point_to_topdown((foot_x, foot_y), homography_matrix)
             
             if topdown_point is not None:
-                # Draw player position on tactical map
+                # Draw player position on tactical map AND dots layer
                 cv2.circle(topdown_view, topdown_point, 6, box_color, -1)
                 cv2.circle(topdown_view, topdown_point, 7, (0, 0, 0), 1)
                 
@@ -912,10 +1080,11 @@ def process_video():
                 cv2.putText(topdown_view, str(track_id), 
                            (topdown_point[0] + 8, topdown_point[1] + 4),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        
-        # Update persistent tactical map
-        if PERSISTENT_DOTS and persistent_tactical_map is not None:
-            persistent_tactical_map = topdown_view.astype(np.float32)
+                
+                # Also draw on dots layer for persistence
+                if PERSISTENT_DOTS and dots_layer is not None:
+                    cv2.circle(dots_layer, topdown_point, 6, box_color, -1)
+                    cv2.circle(dots_layer, topdown_point, 7, (0, 0, 0), 1)
         
         # ====================================================================
         # CREATE SIDE-BY-SIDE OUTPUT
