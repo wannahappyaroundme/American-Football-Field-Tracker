@@ -64,22 +64,29 @@ TEAM_B_COLOR = (0, 0, 255)      # 빨간색
 REFEREE_COLOR = (0, 255, 255)   # 노란색
 UNKNOWN_COLOR = (128, 128, 128) # 회색
 
-# 적응형 팀 분류
-TEAM_DETECTION_METHOD = 'adaptive_clustering'  # 자동 클러스터링
-MIN_PLAYERS_FOR_CLUSTERING = 6  # 최소 선수 수
-NUM_TEAM_CLUSTERS = 3           # 클러스터 개수
+# 팀 분류 방식
+TEAM_DETECTION_METHOD = 'fixed_range'  # 고정 HSV 범위 사용 (정확함!) ← 추천!
+                                        # 'adaptive_clustering' = 자동 클러스터링 (부정확할 수 있음)
+MIN_PLAYERS_FOR_CLUSTERING = 6  # 최소 선수 수 (adaptive_clustering일 때만 사용)
+NUM_TEAM_CLUSTERS = 3           # 클러스터 개수 (adaptive_clustering일 때만 사용)
 
 # ============================================================================
 # 객체 추적 설정 (중요! - 팀 변경 방지)
 # ============================================================================
 
 ENABLE_TRACKING = True              # 객체 추적 활성화
-MAX_TRACKING_FRAMES = 60            # 탐지 없이 유지할 최대 프레임 (증가!)
-TRACKING_IOU_THRESHOLD = 0.25       # IoU 임계값 (낮을수록 더 관대)
+MAX_TRACKING_FRAMES = 90            # 탐지 없이 유지할 최대 프레임 (더 길게 추적)
+TRACKING_IOU_THRESHOLD = 0.20       # IoU 임계값 (낮을수록 더 관대, 더 공격적인 매칭)
 
 # 팀 고정 (한 번 할당된 팀은 절대 바뀌지 않음)
 FREEZE_TEAM_ASSIGNMENT = True       # 팀 할당 고정
-TEAM_ASSIGNMENT_CONFIDENCE = 5      # 5프레임 후 팀 고정
+TEAM_ASSIGNMENT_CONFIDENCE = 2      # 2프레임 후 팀 고정 (빠른 안정화!)
+
+# 디버깅 및 시각화
+SHOW_FROZEN_INDICATOR = True        # 고정된 선수에게 녹색 테두리 표시
+PRINT_FREEZE_EVENTS = True          # 팀 고정 시 콘솔 출력
+PRINT_TRACKING_STATS = True         # 프레임마다 추적 통계 출력
+DEBUG_TEAM_COLORS = True            # 팀 색상 디버그 (HSV 값 출력)
 
 # ============================================================================
 # Tactical Map 설정
@@ -90,9 +97,17 @@ FIELD_HEIGHT = 600          # 픽셀
 FIELD_LENGTH_YARDS = 120    # 야드
 FIELD_WIDTH_YARDS = 53.33   # 야드
 
-# 지속적인 점 표시
-PERSISTENT_DOTS = True      # 점이 사라지지 않음
-DOT_FADE_ALPHA = 0.98      # 페이드 속도 (1.0 = 안 사라짐)
+# 지속적인 점 표시 (잔상 설정)
+PERSISTENT_DOTS = True      # 점이 사라지지 않음 (False = 잔상 없음, 깨끗함)
+DOT_FADE_ALPHA = 0.70       # 페이드 속도 (0.85→0.70 = 매우 빠른 페이드, 잔상 최소화)
+                            # 0.98 = 느린 페이드 (많은 잔상)
+                            # 0.85 = 빠른 페이드 (적은 잔상)
+                            # 0.70 = 매우 빠른 페이드 (거의 없음) ← 현재!
+                            # False로 설정 = 잔상 완전 제거
+
+# 잔상 제거 옵션들 (선택)
+MAX_TRAIL_FRAMES = None     # None = 무제한, 숫자 = 최근 N프레임만 표시
+                            # 예: 10 = 최근 10프레임만 (약 0.15초)
 
 # ============================================================================
 # 거리 측정

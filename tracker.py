@@ -450,7 +450,8 @@ class RobustTracker:
                         # 충분한 신뢰도 달성 - 팀 고정!
                         if track['team_confidence'] >= self.team_confidence_frames:
                             track['team_frozen'] = True
-                            print(f"  → ID:{track['id']} 팀 고정: {track['team_label']}")
+                            if config.PRINT_FREEZE_EVENTS:
+                                print(f"  🔒 ID:{track['id']} 팀 고정: {track['team_label']} (신뢰도: {track['team_confidence']}프레임)")
                     else:
                         # 팀이 바뀜 - 신뢰도 리셋하고 새 팀으로
                         track['team_label'] = new_team_label
@@ -621,30 +622,42 @@ class AdaptiveTeamClassifier:
 def classify_team_fixed(hsv_color: np.ndarray) -> Tuple[str, Tuple[int, int, int]]:
     """
     Classify team based on fixed HSV color ranges.
-    
+
     Args:
         hsv_color: Dominant HSV color (H, S, V)
-        
+
     Returns:
         Tuple of (team_label, visualization_color_bgr)
     """
     h, s, v = hsv_color
-    
+
+    # Debug: Print detected color
+    if config.DEBUG_TEAM_COLORS and np.random.rand() < 0.05:  # 5% 확률로 출력 (너무 많이 안 나오게)
+        print(f"  🎨 Detected HSV: H={h:.1f}, S={s:.1f}, V={v:.1f}")
+
     # Check Team A range
     (h_min_a, s_min_a, v_min_a), (h_max_a, s_max_a, v_max_a) = config.TEAM_A_HSV_RANGE
     if h_min_a <= h <= h_max_a and s_min_a <= s <= s_max_a and v_min_a <= v <= v_max_a:
+        if config.DEBUG_TEAM_COLORS and np.random.rand() < 0.05:
+            print(f"    → Team A matched!")
         return "Team A", config.TEAM_A_COLOR
-    
+
     # Check Team B range
     (h_min_b, s_min_b, v_min_b), (h_max_b, s_max_b, v_max_b) = config.TEAM_B_HSV_RANGE
     if h_min_b <= h <= h_max_b and s_min_b <= s <= s_max_b and v_min_b <= v <= v_max_b:
+        if config.DEBUG_TEAM_COLORS and np.random.rand() < 0.05:
+            print(f"    → Team B matched!")
         return "Team B", config.TEAM_B_COLOR
-    
+
     # Check Referee range
     (h_min_r, s_min_r, v_min_r), (h_max_r, s_max_r, v_max_r) = config.REFEREE_HSV_RANGE
     if h_min_r <= h <= h_max_r and s_min_r <= s <= s_max_r and v_min_r <= v <= v_max_r:
+        if config.DEBUG_TEAM_COLORS and np.random.rand() < 0.05:
+            print(f"    → Referee matched!")
         return "Referee", config.REFEREE_COLOR
-    
+
+    if config.DEBUG_TEAM_COLORS and np.random.rand() < 0.05:
+        print(f"    → Unknown (no match)")
     return "Unknown", config.UNKNOWN_COLOR
 
 
@@ -838,10 +851,16 @@ def process_video():
     print(f"  ROI: Excluding top {config.ROI_TOP_PERCENT*100:.0f}% and bottom {config.ROI_BOTTOM_PERCENT*100:.0f}%")
     print("  Tracking: ENABLED - maintains IDs across frames" if config.ENABLE_TRACKING else "  Tracking: DISABLED")
     print("  Tactical dots: PERSISTENT - no blinking" if config.PERSISTENT_DOTS else "  Tactical dots: REFRESH each frame")
+    print(f"  Team freeze: After {config.TEAM_ASSIGNMENT_CONFIDENCE} frames - AGGRESSIVE MODE" if config.FREEZE_TEAM_ASSIGNMENT else "  Team freeze: DISABLED")
     print("  Priority: Accuracy over speed (offline analysis)")
     print()
-    
+
     frame_count = 0
+    tracking_stats = {
+        'total_frozen': 0,
+        'max_players_tracked': 0,
+        'freeze_events': []
+    }
     
     while True:
         ret, frame = cap.read()
@@ -986,11 +1005,22 @@ def process_video():
         
         if tracker:
             tracked_objects = tracker.update(detections_list)
+
+            # Update tracking statistics
+            frozen_count = sum(1 for obj in tracked_objects if obj.get('team_frozen', False))
+            total_count = len(tracked_objects)
+            tracking_stats['total_frozen'] = max(tracking_stats['total_frozen'], frozen_count)
+            tracking_stats['max_players_tracked'] = max(tracking_stats['max_players_tracked'], total_count)
+
+            # Print tracking statistics (every 30 frames)
+            if config.PRINT_TRACKING_STATS and frame_count % 30 == 0:
+                fresh_count = sum(1 for obj in tracked_objects if obj.get('age', 0) == 0)
+                print(f"  📊 Frame {frame_count}: {total_count} players | {frozen_count} frozen (🔒) | {fresh_count} fresh detections")
         else:
             # No tracking - use detections directly
-            tracked_objects = [{'id': i, 'bbox': d[0], 'team_label': d[1], 'team_color': d[2], 'age': 0} 
+            tracked_objects = [{'id': i, 'bbox': d[0], 'team_label': d[1], 'team_color': d[2], 'age': 0}
                              for i, d in enumerate(detections_list)]
-        
+
         # ====================================================================
         # VISUALIZATION - Draw tracked objects
         # ====================================================================
@@ -1021,12 +1051,19 @@ def process_video():
             # ============================================================
             # DRAW ON ORIGINAL FRAME
             # ============================================================
-            
+
             # Draw bounding box with team color
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 3)
-            
-            # Draw label with ID and team
-            label = f"ID:{track_id} {team_label}"
+
+            # Add green border indicator for frozen teams
+            is_frozen = obj.get('team_frozen', False)
+            if config.SHOW_FROZEN_INDICATOR and is_frozen:
+                # Draw thick green outer border to indicate frozen team
+                cv2.rectangle(annotated_frame, (x1-3, y1-3), (x2+3, y2+3), (0, 255, 0), 2)
+
+            # Draw label with ID and team (add 🔒 emoji for frozen)
+            lock_emoji = "🔒" if is_frozen else ""
+            label = f"ID:{track_id} {team_label} {lock_emoji}"
             (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             
             # Label background
@@ -1134,11 +1171,27 @@ def process_video():
     print("="*70)
     print(f"\nOutput saved to: {config.OUTPUT_VIDEO}")
     print(f"Total frames processed: {frame_count}")
+
+    # Print team freezing statistics
+    if tracker and config.FREEZE_TEAM_ASSIGNMENT:
+        print(f"\n{'='*70}")
+        print("  TEAM FREEZING STATISTICS")
+        print("="*70)
+        print(f"Maximum players tracked simultaneously: {tracking_stats['max_players_tracked']}")
+        print(f"Maximum frozen players: {tracking_stats['total_frozen']}")
+        freeze_rate = (tracking_stats['total_frozen'] / tracking_stats['max_players_tracked'] * 100) if tracking_stats['max_players_tracked'] > 0 else 0
+        print(f"Freeze success rate: {freeze_rate:.1f}%")
+        print(f"Team freeze threshold: {config.TEAM_ASSIGNMENT_CONFIDENCE} consecutive frames")
+        print(f"\n✅ Players with green borders (🔒) have permanently frozen team assignments")
+        print(f"✅ These players will NEVER change teams during the video")
+
     print(f"\nOpen {config.OUTPUT_VIDEO} to view the analysis.")
     print("\nFeatures in output:")
     print("  • Left side: Original video with team-colored bounding boxes")
     print("  • Right side: Top-down tactical view showing player positions")
     print("  • Color coding: Team A (blue), Team B (red), Referee (yellow)")
+    if config.SHOW_FROZEN_INDICATOR:
+        print("  • Green border: Player team is permanently frozen 🔒")
 
 
 # ============================================================================
