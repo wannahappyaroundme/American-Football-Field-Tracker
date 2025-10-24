@@ -65,10 +65,10 @@ REFEREE_COLOR = (0, 255, 255)   # 노란색
 UNKNOWN_COLOR = (128, 128, 128) # 회색
 
 # 팀 분류 방식
-TEAM_DETECTION_METHOD = 'fixed_range'  # 고정 HSV 범위 사용 (정확함!) ← 추천!
-                                        # 'adaptive_clustering' = 자동 클러스터링 (부정확할 수 있음)
-MIN_PLAYERS_FOR_CLUSTERING = 6  # 최소 선수 수 (adaptive_clustering일 때만 사용)
-NUM_TEAM_CLUSTERS = 3           # 클러스터 개수 (adaptive_clustering일 때만 사용)
+TEAM_DETECTION_METHOD = 'adaptive_clustering'  # 개선된 자동 클러스터링 (모든 영상에 적용!) ← 추천!
+                                                # 'fixed_range' = 고정 HSV 범위 (수동 설정 필요)
+MIN_PLAYERS_FOR_CLUSTERING = 6  # 최소 선수 수 (이 이하면 fixed_range로 폴백)
+NUM_TEAM_CLUSTERS = 3           # 클러스터 개수 (Team A, Team B, Referee)
 
 # ============================================================================
 # 객체 추적 설정 (중요! - 팀 변경 방지)

@@ -574,10 +574,15 @@ def get_team_color(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Option
 
 class AdaptiveTeamClassifier:
     """
-    Adaptive team classifier that analyzes all players in frame.
+    IMPROVED Adaptive team classifier that analyzes all players in frame.
     Groups players with similar shirt colors into teams automatically.
+
+    개선점:
+    - Hue(색상) 기반 클러스터링으로 색상 구분 강화
+    - 무채색(흰색/검정/회색) 별도 처리
+    - 더 정확한 팀 분류
     """
-    
+
     def __init__(self, n_clusters=3, min_players=6):
         """Initialize adaptive classifier."""
         self.n_clusters = n_clusters
@@ -585,37 +590,110 @@ class AdaptiveTeamClassifier:
         self.team_centers = None  # Cached team color centers
         self.team_labels = {0: "Team A", 1: "Team B", 2: "Referee"}
         self.team_colors_bgr = {0: config.TEAM_A_COLOR, 1: config.TEAM_B_COLOR, 2: config.REFEREE_COLOR}
-    
+
+    def _is_achromatic(self, hsv_color):
+        """무채색(흰색/검정/회색) 판단"""
+        h, s, v = hsv_color
+        # 채도가 낮으면 무채색
+        return s < 40
+
+    def _hue_distance(self, hue1, hue2):
+        """Hue는 원형이므로 특수한 거리 계산"""
+        diff = abs(hue1 - hue2)
+        # Hue는 0-180 범위이고 원형이므로
+        if diff > 90:
+            diff = 180 - diff
+        return diff
+
     def classify_all_players(self, player_colors):
         """
-        Classify all players by clustering their shirt colors.
-        
+        IMPROVED: Classify all players by clustering their shirt colors.
+
+        개선된 알고리즘:
+        1. 무채색(흰/검/회) vs 유채색 분리
+        2. 유채색은 Hue 중심으로 클러스터링
+        3. 무채색은 밝기(V)로 구분
+
         Args:
             player_colors: List of HSV colors from all detected players
-            
+
         Returns:
             List of (team_label, team_color_bgr) for each player
         """
         if len(player_colors) < self.min_players:
             # Not enough players - use fixed ranges
             return [classify_team_fixed(color) for color in player_colors]
-        
-        # Perform K-Means clustering on all player colors
+
         colors_array = np.array(player_colors)
-        kmeans = KMeans(n_clusters=min(self.n_clusters, len(player_colors)), 
-                       n_init=10, random_state=42)
-        labels = kmeans.fit_predict(colors_array)
-        
-        # Cache cluster centers for consistency
-        self.team_centers = kmeans.cluster_centers_
-        
-        # Assign team labels based on cluster
+        n_players = len(colors_array)
+
+        # Step 1: 무채색 vs 유채색 분리
+        achromatic_mask = np.array([self._is_achromatic(c) for c in colors_array])
+        chromatic_mask = ~achromatic_mask
+
+        achromatic_colors = colors_array[achromatic_mask]
+        chromatic_colors = colors_array[chromatic_mask]
+
+        # Step 2: 클러스터 할당 배열
+        cluster_labels = np.zeros(n_players, dtype=int)
+
+        # Step 3: 유채색 클러스터링 (Hue 기반)
+        if len(chromatic_colors) > 0:
+            # Hue만 추출하여 클러스터링 (색상이 가장 중요!)
+            hues = chromatic_colors[:, 0].reshape(-1, 1)
+
+            # 유채색 그룹 수 결정 (최대 2개 팀)
+            n_chromatic_clusters = min(2, len(chromatic_colors))
+
+            if n_chromatic_clusters > 1:
+                kmeans_chromatic = KMeans(n_clusters=n_chromatic_clusters, n_init=10, random_state=42)
+                chromatic_labels = kmeans_chromatic.fit_predict(hues)
+                cluster_labels[chromatic_mask] = chromatic_labels
+            else:
+                cluster_labels[chromatic_mask] = 0
+
+        # Step 4: 무채색 클러스터링 (밝기 기반)
+        if len(achromatic_colors) > 0:
+            # 밝기(V)로 구분: 흰색 vs 검정/회색
+            brightness = achromatic_colors[:, 2]  # V channel
+
+            # 밝기 기준으로 분류
+            # V > 150: 흰색 계열
+            # V < 150: 검정/회색 계열
+            achromatic_labels = np.where(brightness > 150,
+                                        2,  # 밝은 색 (흰색) -> 클러스터 2
+                                        1)  # 어두운 색 (검정/회색) -> 클러스터 1
+
+            cluster_labels[achromatic_mask] = achromatic_labels
+
+        # Step 5: 클러스터별 대표 색상 계산
+        unique_clusters = np.unique(cluster_labels)
+        self.team_centers = {}
+
+        for cluster_id in unique_clusters:
+            mask = cluster_labels == cluster_id
+            cluster_colors = colors_array[mask]
+            # 대표 색상 = 중앙값 (평균보다 robust)
+            self.team_centers[cluster_id] = np.median(cluster_colors, axis=0)
+
+        # Step 6: 팀 라벨 할당
         results = []
-        for label in labels:
+        for label in cluster_labels:
             team_label = self.team_labels.get(label, f"Team {label}")
             team_color = self.team_colors_bgr.get(label, config.UNKNOWN_COLOR)
             results.append((team_label, team_color))
-        
+
+        # Debug: 클러스터 정보 출력
+        if config.DEBUG_TEAM_COLORS:
+            print(f"\n  🎨 Adaptive Clustering Results:")
+            print(f"    Total players: {n_players}")
+            print(f"    Chromatic (유채색): {len(chromatic_colors)}")
+            print(f"    Achromatic (무채색): {len(achromatic_colors)}")
+            for cluster_id in unique_clusters:
+                count = np.sum(cluster_labels == cluster_id)
+                center = self.team_centers.get(cluster_id, [0, 0, 0])
+                print(f"    Cluster {cluster_id}: {count} players, Center HSV: H={center[0]:.1f}, S={center[1]:.1f}, V={center[2]:.1f}")
+
         return results
 
 
