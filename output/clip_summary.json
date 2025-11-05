@@ -1,0 +1,40 @@
+{
+  "gameKey": "GAME_2024_001",
+  "gameDate": "2024-01-15",
+  "homeTeam": "Home Team",
+  "awayTeam": "Away Team",
+  "stadium": "Stadium Name",
+  "weather": "Clear",
+  "temperature": "72F",
+  "Clips": [
+    {
+      "clipKey": "CLIP_001",
+      "quarter": 1,
+      "time": "12:00",
+      "down": 1,
+      "toGo": 10,
+      "yardLine": 25,
+      "offensiveTeam": "Home Team",
+      "defensiveTeam": "Away Team",
+      "offensiveFormation": "Unknown",
+      "defensiveFormation": "Unknown",
+      "personnel": "Unknown",
+      "playType": "RUN",
+      "playResult": "Unknown",
+      "gainYard": 0,
+      "tackler": "Unknown",
+      "carrierInfo": {
+        "trackId": 2025,
+        "jerseyNumber": "Unknown"
+      },
+      "passerInfo": {
+        "trackId": 2025,
+        "jerseyNumber": "Unknown"
+      },
+      "tacklerInfo": {
+        "trackId": null,
+        "jerseyNumber": "Unknown"
+      }
+    }
+  ]
+}

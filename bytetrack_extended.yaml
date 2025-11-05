@@ -1,0 +1,10 @@
+# Custom ByteTrack configuration for football play analysis
+# Extended buffer for long-term tracking without detection
+# Aggressive settings for stable tracking and reduced flickering
+
+tracker_type: bytetrack  # tracker type, ['botsort', 'bytetrack']
+track_high_thresh: 0.3  # threshold for the first association (낮춤: 더 많은 detection 허용)
+track_low_thresh: 0.05  # threshold for the second association (매우 낮음: 공 + 약한 detection 포함)
+new_track_thresh: 0.5  # threshold for init new track (높임: 새 track 생성 어렵게)
+track_buffer: 900  # buffer to calculate the time when to remove tracks (900 frames = 30 seconds at 30 FPS)
+match_thresh: 0.5  # threshold for matching tracks (낮춤: 더 관대한 매칭)

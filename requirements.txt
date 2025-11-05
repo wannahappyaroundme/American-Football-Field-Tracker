@@ -1,7 +1,10 @@
-# Football Video Analysis Tool - Dependencies
-# Install with: pip install -r requirements.txt
-
-opencv-python>=4.8.0       # Video processing and computer vision
-numpy>=1.24.0              # Numerical operations
-ultralytics>=8.0.0         # YOLOv8 object detection
-scikit-learn>=1.3.0        # K-Means clustering for team classification
+ultralytics
+opencv-python
+numpy
+scipy
+pytesseract
+scikit-learn
+torch
+torchvision
+pillow
+git+https://github.com/openai/CLIP.git

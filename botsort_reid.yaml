@@ -1,0 +1,17 @@
+# Custom BoT-SORT configuration with Re-ID for football play analysis
+# Optimized for minimal track fragmentation (prevent duplicate IDs)
+
+tracker_type: botsort  # BoT-SORT supports appearance features
+
+# Detection association thresholds (OPTIMIZED for track persistence)
+track_high_thresh: 0.3  # threshold for high-confidence detections
+track_low_thresh: 0.05  # threshold for low-confidence detections (very permissive)
+new_track_thresh: 0.7  # INCREASED: Much harder to create new tracks (was 0.3)
+track_buffer: 1200  # INCREASED: 40 seconds persistence (was 600 = 20s)
+match_thresh: 0.3  # DECREASED: Easier IoU matching (was 0.6)
+
+# BoT-SORT specific settings
+gmc_method: sparseOptFlow  # global motion compensation (camera movement)
+proximity_thresh: 0.7  # INCREASED: More lenient spatial matching (was 0.5)
+appearance_thresh: 0.25  # appearance similarity threshold (Re-ID)
+with_reid: True  # Enable Re-ID feature extraction (note: not implemented in ultralytics, using custom CLIP Re-ID instead)

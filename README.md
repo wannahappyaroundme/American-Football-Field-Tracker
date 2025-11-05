@@ -1,837 +1,495 @@
-# Football Video Analysis Tool
-
-## Project Overview
-
-This project provides an offline video analysis system for American football footage. The system automatically detects players, classifies them by team based on jersey color, and visualizes their positions on a tactical top-down map. The primary goal is to transform raw game footage into an annotated video that shows both the original view with team-identified players and a simultaneous bird's-eye tactical map of player positions on the field.
-
-**Key Capabilities:**
-- **Individual Player Detection**: Uses state-of-the-art YOLOv8 to accurately detect each player, even when overlapping
-- **Automatic Team Classification**: Analyzes jersey colors to identify Team A, Team B, and Referees
-- **Tactical Visualization**: Projects player positions onto a 2D top-down field map
-- **Side-by-Side Output**: Combines annotated original footage with tactical map in a single video
-
-**Design Philosophy**: Accuracy and detailed analysis are prioritized over real-time performance. This is an offline analysis tool designed to process entire game videos and produce comprehensive annotated output.
-
-## Changelog
-
-### v2.1 - Robust Team Caching & ID Persistence (October 2025)
-
-**🔒 Team Assignment Freezing (핵심 개선):**
-- **문제:** 팀이 프레임마다 자주 변경되는 문제
-- **해결:** 각 객체에 팀 정보 캐시 및 고정 시스템 도입
-  - 같은 팀으로 5프레임 연속 분류되면 팀 영구 고정
-  - 고정된 팀은 절대 변경되지 않음 (frozen flag)
-  - 탐지 실패시에도 캐시된 팀 정보 유지
-- **결과:** 안정적인 팀 할당, 팀 변경 없음
-
-**🆔 향상된 객체 추적 (RobustTracker):**
-- 기존 SimpleTracker를 RobustTracker로 업그레이드
-- 각 객체에 고유 ID 부여 (절대 변경 안 됨)
-- IoU 매칭 임계값 완화 (0.25)
-- 최대 60프레임까지 탐지 없이 추적 유지
-- **결과:** 안정적인 ID 유지, 깜빡임 없음
-
-**⚙️ 설정 파일 분리:**
-- `tracker_config.py`로 모든 설정 분리
-- 코드 수정 없이 설정만 변경 가능
-- 팀 색상, 추적 파라미터 등 쉽게 조정
-
-**🧹 코드 정리:**
-- 사용하지 않는 CameraChangeDetector 제거
-- 모든 설정을 config 파일에서 로드
-- 더 깔끔하고 유지보수 쉬운 구조
-
-### v2.0 - Major Pipeline Overhaul (October 2025)
-- **Complete Rewrite**: Replaced entire pipeline with consolidated, single-script architecture
-- **YOLOv8 Integration**: Implemented pre-trained YOLOv8 model for robust person detection, solving the overlapping player problem
-- **Stadium Recognition**: Added HSV-based field/stadium masking to automatically exclude people and objects outside the playing area
-- **Background Removal**: YOLO detection now runs on masked frames with background removed, improving accuracy and reducing false positives
-- **Cached Homography**: Homography matrix calculated once from first frame and reused (cookie value approach) - no per-frame recalculation
-- **Object Tracking**: Implemented SimpleTracker to maintain player IDs and positions even when YOLO detection temporarily fails
-- **Persistent Tactical Dots**: Player positions on tactical map now accumulate and stay visible (no blinking) for better formation analysis
-- **Team Classification**: Added automatic team identification via K-Means color clustering on jersey torso regions
-- **Relative ROI Masking**: Top and bottom exclusions use percentages (not absolute pixels) for resolution-independent operation
-- **Dual Visualization**: Created side-by-side output showing original footage with annotations alongside tactical field map
-- **Simplified Codebase**: Consolidated all functionality into single `tracker.py` script for maintainability
-
-### v1.0 - Initial Implementation
-- Basic field line detection using Hough Transform
-- HSV color-based field segmentation
-- Multiple experimental tracking approaches
-
-## How It Works
-
-The system implements a comprehensive multi-stage pipeline:
-
-### Stage 0: Stadium/Field Recognition and Background Removal
-
-**Purpose**: Identify the playing field area and exclude all people and objects outside the stadium (fans, coaches, sideline personnel, background objects).
-
-**Process**:
-
-1. **HSV Color Space Conversion**:
-   - Converts each frame from BGR to HSV color space
-   - HSV separates color (Hue) from brightness (Value), making it robust to lighting variations
-
-2. **Green Field Isolation**:
-   - Uses `cv2.inRange()` with configurable HSV bounds to create a binary mask
-   - Default range: H=35-85, S=40-255, V=40-255 (green grass)
-   - White pixels (255) = playing field
-   - Black pixels (0) = non-field areas to exclude
-
-3. **Morphological Cleanup**:
-   - **Closing operation**: Fills small gaps and holes within the field mask
-   - **Opening operation**: Removes small noise specks outside the field
-   - **Dilation**: Slightly expands mask to ensure players near edges are included
-   - Kernel size and iterations are configurable
-
-4. **ROI (Region of Interest) Application**:
-   - Applies relative percentage-based exclusions (not absolute pixels)
-   - **Top exclusion**: Removes top X% of frame (default: 20% for scoreboard/upper crowd)
-   - **Bottom exclusion**: Removes bottom Y% of frame (default: 10% for lower crowd/ads)
-   - Percentages automatically adapt to any video resolution
-
-5. **Combined Mask Creation**:
-   - Combines stadium field mask with ROI exclusions
-   - Final mask represents only the playable field area where players should be detected
-
-6. **Background Removal for YOLO**:
-   - Applies mask to frame using `cv2.bitwise_and()`
-   - Zeros out all pixels outside the field
-   - YOLO detection runs on this masked frame, never "seeing" the background
-   - Dramatically reduces false positives from fans, coaches, and sideline objects
-
-7. **Post-Detection Filtering**:
-   - Even after YOLO detection, verifies each player's foot position is within the mask
-   - Double-check ensures only field-based players are processed
-   - Excludes any erroneous detections outside the stadium
-
-**Benefits**:
-- ✅ Eliminates false detections from crowd, coaches, sideline personnel
-- ✅ Focuses computational resources on actual players
-- ✅ Improves team classification accuracy (only analyzes field players)
-- ✅ Reduces processing time by giving YOLO a simpler image
-- ✅ Resolution-independent (percentage-based, not pixel-based)
-
-**Tuning**: The `FIELD_HSV_LOWER` and `FIELD_HSV_UPPER` parameters should be adjusted based on the specific field color in your footage (natural grass vs artificial turf, lighting conditions, etc.).
-
-### Stage 1: Static Homography Calculation
-
-**Purpose**: Establish a transformation matrix to map video coordinates to a 2D top-down field representation.
-
-**Process**:
-1. **First Frame Analysis**: The system analyzes the first frame of the video
-2. **Field Line Detection**: 
-   - Converts frame to grayscale
-   - Applies morphological enhancement to highlight white field lines
-   - Uses Canny edge detection to identify edges
-   - Employs Hough Line Transform (`cv2.HoughLinesP`) to detect line segments
-   - Classifies lines as horizontal (yard lines) or vertical (sidelines/hash marks) based on angle
-3. **Intersection Calculation**: 
-   - Mathematically calculates intersection points between horizontal and vertical lines
-   - These intersections represent known locations on the field (e.g., where a yard line meets a sideline)
-4. **Homography Matrix**:
-   - Maps at least 4 intersection points from the video coordinates (source) to their known positions on a standardized top-down field diagram (destination)
-   - Uses `cv2.getPerspectiveTransform()` or `cv2.findHomography()` with RANSAC for robust calculation
-   - Stores this matrix for use throughout the entire video
-
-**Why Static (Cached) Homography**: Football broadcast cameras typically maintain a consistent view angle for extended periods. A single homography matrix is sufficiently accurate and dramatically faster than recalculating per-frame. The system uses a "cookie value" approach - calculating once and caching the result for reuse throughout the entire video. This eliminates redundant computation while maintaining accuracy.
-
-**Performance Impact**: By caching the homography matrix, the system avoids ~50-100ms of line detection per frame, resulting in 5-10x faster processing of the transformation stage.
-
-### Stage 2: YOLOv8 Object Detection
-
-**Purpose**: Accurately detect individual players in each frame, even when they overlap or are in close proximity.
-
-**Process**:
-1. **Model Inference**: For each frame, the pre-trained YOLOv8 model processes the image
-2. **Person Detection**: YOLO identifies all instances of the 'person' class (COCO dataset class 0)
-3. **Bounding Boxes**: Returns precise bounding boxes `[x1, y1, x2, y2]` and confidence scores for each detected person
-4. **Overlap Handling**: Unlike edge-based methods, YOLO's instance segmentation can distinguish between overlapping players by learning object boundaries
-
-**Why YOLO**: Traditional edge detection and color segmentation fail when players overlap. YOLOv8's deep learning approach understands object instances, making it ideal for crowded football scenarios.
-
-### Stage 3: Team Classification via Color Clustering
-
-**Purpose**: Automatically identify which team each detected player belongs to based on jersey color.
-
-**Process**:
-
-1. **Torso Region Extraction** (`get_team_color` function):
-   - For each player's bounding box, extracts the upper torso region (20%-60% from top of box)
-   - This region is most likely to contain the jersey, avoiding legs (field color) and helmet
-   - Converts the extracted region from BGR to HSV color space
-   - Filters out very dark (shadows) and very bright (glare) pixels based on the V (Value) channel
-
-2. **Dominant Color Identification**:
-   - Applies K-Means clustering with k=1 to find the single most dominant color
-   - Returns the cluster center as the representative HSV color of the jersey
-
-3. **Team Assignment** (`classify_team` function):
-   - Compares the dominant HSV color against three predefined ranges:
-     - **Team A Range**: e.g., blue jerseys (H: 90-130, S: 50-255, V: 50-255)
-     - **Team B Range**: e.g., white jerseys (H: 0-180, S: 0-30, V: 180-255)
-     - **Referee Range**: e.g., black jerseys (H: 0-180, S: 0-255, V: 0-60)
-   - Returns a label ("Team A", "Team B", "Referee", or "Unknown") and corresponding visualization color
-
-**Why HSV**: Unlike RGB, HSV separates color (Hue) from brightness (Value), making it more robust to lighting variations and shadows on the field.
-
-**Configuration**: The HSV ranges are defined in the configuration section of `tracker.py` and should be adjusted based on the actual jersey colors in your footage.
-
-### Stage 3.5: Robust Object Tracking with Team Freezing (RobustTracker)
-
-**Purpose**: Maintain consistent player IDs and **permanently cache team assignments** to prevent team changes across frames.
-
-**Process**:
-
-1. **Detection Collection**: All YOLO detections from current frame are collected with their team classifications
-
-2. **IoU-Based Matching**:
-   - For each existing track from previous frame, calculate IoU (Intersection over Union) with all new detections
-   - Match track to detection with highest IoU above threshold (default: 0.25)
-   - Update matched tracks with new bounding box
-
-3. **Team Assignment Freezing (핵심 기능)**:
-   - **Initial Assignment**: When a player is first detected, they receive a tentative team assignment
-   - **Confidence Building**: Each time the player is classified as the same team, confidence counter increases
-   - **Permanent Freeze**: After 5 consecutive frames with the same team, the team is **permanently frozen**
-   - **Frozen State**: Once frozen, the team assignment **never changes**, even if subsequent color detection suggests otherwise
-   - **Cache Priority**: Cached team information takes absolute precedence over real-time color detection
-   - **Result**: No more team flickering or inconsistent assignments
-
-4. **Track Aging**:
-   - **Matched tracks**: Reset age to 0 (fresh detection)
-   - **Unmatched tracks**: Increment age by 1
-   - **Keep alive**: Tracks survive up to 60 frames without detection (default: 60 frames)
-   - **Team Preservation**: Even when tracking without detection, frozen team assignment is maintained
-
-5. **New Track Creation**: Unmatched detections become new tracks with unique IDs
-
-6. **ID Persistence**: Each player maintains the same ID throughout the video (unless they disappear for > 60 frames)
-
-**Why Robust Tracking**: 
-- **Problem**: Per-frame color detection can be noisy due to lighting, shadows, and camera angles, causing team assignments to flicker
-- **Solution**: Cache and freeze team assignments after confidence is established
-- **Benefit**: Stable, consistent team identification throughout the entire video
-
-**Cookie Value Approach**: 
-- **Homography**: Calculated once, reused for all frames
-- **Team Assignment**: Classified initially, frozen after confidence, cached permanently
-- **Tracking**: Maintains object continuity through detection failures
-
-The system prioritizes **cached, validated data** over real-time detection to ensure consistency and stability.
-
-### Stage 4: Coordinate Transformation
-
-**Purpose**: Map player positions from the angled camera view to precise locations on the 2D top-down field map.
-
-**Process**:
-1. **Foot Position Calculation**: For each detected player, calculates the bottom-center point of their bounding box `(x_foot, y_foot)`. This represents where the player is standing on the field.
-
-2. **Perspective Transform**: Uses the static homography matrix to transform this point:
-   ```python
-   transformed_point = cv2.perspectiveTransform(foot_point, homography_matrix)
-   ```
-
-3. **Coordinate Clipping**: Ensures the transformed coordinates fall within the bounds of the top-down field image
-
-**Mathematical Foundation**: The homography matrix H is a 3×3 transformation that maps points from one plane to another. It accounts for perspective distortion, enabling accurate spatial representation.
-
-### Stage 5: Visualization & Output
-
-**Purpose**: Create a comprehensive visual output combining the original footage with tactical analysis.
-
-**Process**:
-
-1. **Original Frame Annotation**:
-   - Draws bounding boxes around each detected player using their team color
-   - Adds text labels above each box showing:
-     - Team classification (e.g., "Team A", "Referee")
-     - Confidence score from YOLO (e.g., "0.87")
-   - Uses thick, colored rectangles for clear visibility
-
-2. **Top-Down Tactical Map** (Persistent Mode):
-   - Starts with the field template (green field with yard lines)
-   - **Persistent Dots**: Unlike traditional frame-by-frame rendering, dots are accumulated and remain visible
-   - For each player, draws a colored circle at their transformed position  
-   - Circle color matches their team classification
-   - Includes a thin black border around each circle for clarity
-   - **No Blinking**: Dots stay on screen, creating a trail of player movements
-   - **Gradual Fade**: Old dots slowly fade (alpha = 0.98) to prevent overcrowding while maintaining recent movement history
-   - **Formation Analysis**: Persistent display allows clear visualization of player paths and formation changes over time
-   - Includes player ID numbers next to each dot for tracking individual players
-
-3. **Side-by-Side Composition**:
-   - Resizes the tactical map to match the height of the original frame
-   - Horizontally stacks (concatenates) the annotated original frame and the tactical map
-   - Ensures consistent dimensions for video encoding
-
-4. **Video Output**:
-   - Writes the combined frame to the output MP4 file
-   - Maintains the original video's frame rate for smooth playback
-   - Final video shows both perspectives simultaneously
-
-## Technical Specifications
-
-### Language & Environment
-- **Language**: Python 3.8+
-- **Recommended**: Python 3.9-3.11
-
-### Core Libraries
-
-| Library | Version | Purpose |
-|---------|---------|---------|
-| **OpenCV** (`opencv-python`) | ≥4.8.0 | Video I/O, image processing, homography calculation |
-| **NumPy** | ≥1.24.0 | Numerical operations, array manipulations |
-| **Ultralytics** | ≥8.0.0 | YOLOv8 object detection model |
-| **Scikit-learn** | ≥1.3.0 | K-Means clustering for color analysis |
-
-### System Architecture
-
-**Design Pattern**: Single-script monolithic architecture
-- **File**: `tracker.py` (complete system)
-- **Configuration**: Inline constants at top of script
-- **Modularity**: Functions organized by processing stage
-
-**Processing Model**: Offline batch processing
-- Reads entire input video
-- Processes frame-by-frame sequentially
-- Outputs complete annotated video file
-- No real-time constraints
-
-## Installation & Usage
-
-### Installation
-
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. First run will auto-download YOLOv8 model (~6MB)
-```
-
-### Basic Usage
-
-```bash
-# Place your video in the project directory as:
-# input_game.mp4
-
-# Run the analysis
-python tracker.py
-
-# Output will be saved as:
-# output_analysis.mp4
-```
-
-### Configuration
-
-Edit the configuration section at the top of `tracker.py`:
-
-```python
-# Video paths
-INPUT_VIDEO = "your_video.mp4"
-OUTPUT_VIDEO = "output_analysis.mp4"
-
-# YOLO settings
-YOLO_MODEL = "yolov8n.pt"  # Options: yolov8n, yolov8s, yolov8m, yolov8l, yolov8x
-YOLO_CONFIDENCE = 0.5      # Lower = more detections
-
-# Stadium/Field Recognition (NEW!)
-ENABLE_STADIUM_MASKING = True              # Enable to exclude non-field areas
-FIELD_HSV_LOWER = (35, 40, 40)            # Lower HSV bound for green field
-FIELD_HSV_UPPER = (85, 255, 255)          # Upper HSV bound for green field
-
-# ROI Masking (relative percentages - resolution independent)
-ROI_TOP_PERCENT = 0.20     # Exclude top 20% (scoreboard area)
-ROI_BOTTOM_PERCENT = 0.10  # Exclude bottom 10% (lower crowd)
-
-# Object Tracking (maintains detections when YOLO fails)
-ENABLE_TRACKING = True           # Keep objects alive between detections
-MAX_TRACKING_FRAMES = 30         # Max frames to maintain without detection
-TRACKING_IOU_THRESHOLD = 0.3     # Matching threshold
-
-# Tactical Map Display (persistent dots, no blinking)
-PERSISTENT_DOTS = True           # Dots stay visible (accumulate)
-DOT_FADE_ALPHA = 0.98           # Gradual fade rate (1.0 = no fade)
-
-# Team color ranges (HSV format)
-TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Adjust for your teams
-TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))
-REFEREE_HSV_RANGE = ((0, 0, 0), (180, 255, 60))
-
-# Team colors for visualization (BGR)
-TEAM_A_COLOR = (255, 0, 0)    # Blue
-TEAM_B_COLOR = (0, 0, 255)    # Red
-REFEREE_COLOR = (0, 255, 255) # Yellow
-```
-
-## Model and Accuracy
-
-### Object Detection Model: YOLOv8n Specifications
-
-**Model**: YOLOv8 (You Only Look Once, version 8)
-
-**Architecture Details**:
-- **Variant**: yolov8n.pt (nano - fastest variant for real-time applications)
-- **Parameters**: 3.2 million trainable parameters
-- **Model Size**: 6.2 MB (compact, fast to load)
-- **Backbone**: CSPDarknet with C2f modules
-- **Neck**: PAN (Path Aggregation Network)
-- **Head**: Decoupled detection head (anchor-free)
-- **Input Size**: 640×640 pixels (default, configurable)
-
-**Training Dataset**: COCO (Common Objects in Context)
-- **Dataset Size**: 118,000 training images, 5,000 validation images
-- **Classes**: 80 object categories
-- **Relevant Class**: 'person' (class 0) - used for player detection
-- **Training Images with Persons**: ~64,000 images
-- **Person Instances**: ~262,000 annotated person boxes
-
-**Official COCO Validation Performance**:
-- **mAP50** (Mean Average Precision at IoU=0.5): 52.7%
-- **mAP50-95** (Mean across IoU 0.5-0.95): 37.2%
-- **Precision**: 68% (68% of detections are true positives)
-- **Recall**: 54% (detects 54% of all actual persons)
-- **F1 Score**: 0.60
-
-**Inference Speed** (640×640 input):
-- **CPU (Intel i7)**: 25-40ms per frame → 25-40 FPS
-- **GPU (RTX 3060)**: 5-10ms per frame → 100-200 FPS
-- **Apple M3 Max (MPS)**: 15-20ms per frame → 50-65 FPS
-- **Note**: Higher resolution (1920×1080) takes proportionally longer
-
-**Performance Characteristics**:
-- **Accuracy**: The pre-trained YOLOv8 model achieves high accuracy (mAP 50-95 of ~0.37 on COCO) for general person detection
-- **Strengths**: 
-  - Excellent at detecting individual persons even in crowds
-  - Robust to partial occlusions
-  - Fast inference even on CPU
-  - Handles varying player sizes and poses
-- **Limitations**:
-  - Performance can degrade with heavy occlusions (pileups with 5+ players)
-  - Accuracy varies with video quality, lighting, and camera angle
-  - May occasionally miss distant or partially visible players
-  - False positives possible (e.g., fans, coaches near sideline)
-
-**Football-Specific Expected Performance**:
-- **Clear, close-up players**: 90-95% detection rate
-- **Partially occluded players**: 70-80% detection rate
-- **Distant players (>30 yards from camera)**: 60-70% detection rate
-- **Heavy pileups (5+ overlapping)**: 40-60% individual separation
-- **With stadium masking**: 95%+ precision (very few false positives)
-- **Without stadium masking**: 60-70% precision (many crowd detections)
-
-### Team Classification Algorithm
-
-**Method**: HSV color space analysis with K-Means clustering
-
-**Process**:
-1. Extract torso region from each player bounding box
-2. Apply K-Means (k=1) to find dominant color
-3. Compare dominant color to predefined HSV ranges for each team
-
-**Accuracy Factors**:
-- ✅ **Clear uniforms**: 85-95% accuracy
-- ⚠️ **Similar colors**: May confuse teams with similar shades
-- ⚠️ **Lighting variations**: Shadows and highlights can shift HSV values
-- ⚠️ **Dirt/stains**: Muddy jerseys reduce accuracy
-- ✅ **High contrast teams**: Near-perfect classification
-
-**Accuracy Expectations**:
-- **Ideal conditions** (clear, distinct colors): 90-95%
-- **Typical game conditions**: 80-85%
-- **Poor lighting/muddy field**: 65-75%
-
-**Tuning**: The HSV ranges must be manually adjusted for each game based on the actual team colors. This is the most critical configuration step.
-
-### Homography Transformation Accuracy
-
-**Method**: Static perspective transformation from first frame
-
-**Accuracy Factors**:
-- ✅ **Clear yard lines**: High accuracy (±2-3 yards)
-- ⚠️ **Camera movement**: Accuracy degrades if camera angle changes
-- ⚠️ **Zoomed footage**: May lack sufficient reference lines
-- ✅ **Wide shots**: Best accuracy with full field view
-
-**Limitations**:
-- **Static assumption**: Assumes camera angle doesn't change
-- **Line visibility**: Requires at least 4 clear intersection points
-- **Calibration**: No automatic calibration - relies on detected lines
-
-**Accuracy Expectations**:
-- **Stable camera**: ±2-3 yard accuracy
-- **Moving camera**: ±5-10 yard accuracy (degrades over time)
-- **No camera data**: Falls back to identity transform (positions not accurate)
-
-## Future Development
-
-This system provides a solid foundation for football analytics. Potential enhancements include:
-
-### Short-Term Improvements
-
-1. **Robust Tracking Across Frames**
-   - Implement SORT (Simple Online and Realtime Tracking) or DeepSORT
-   - Maintain consistent player IDs across the entire video
-   - Track individual player trajectories and movement patterns
-   - Currently: Detection is per-frame without temporal consistency
-
-2. **Ball Detection and Possession Tracking**
-   - Detect the football (COCO class 32: 'sports ball')
-   - Identify ball carrier by proximity analysis
-   - Track ball possession changes throughout the play
-   - Visualize ball carrier with distinct highlighting
-
-3. **Enhanced Team Classification**
-   - Machine learning classifier trained on jersey patterns
-   - Use player position context (formation analysis) to validate team assignments
-   - Implement majority voting across frames for consistent team IDs
-
-### Medium-Term Enhancements
-
-4. **Custom YOLO Model Training**
-   - Train YOLOv8 on football-specific datasets (e.g., from Roboflow)
-   - Improve detection accuracy for small/distant players
-   - Reduce false positives (coaches, referees, fans)
-   - Better handling of football-specific poses (crouching linemen, jumping receivers)
-
-5. **Dynamic Homography**
-   - Detect field lines in multiple frames, not just the first
-   - Update homography matrix when camera angle changes (zooms, pans)
-   - Handle broadcast footage with varying camera positions
-   - Improve accuracy for dynamic camera work
-
-6. **Player Pose Estimation**
-   - Integrate pose estimation models (MediaPipe, YOLO-Pose)
-   - Detect player actions: running, crouching, jumping, tackling
-   - Analyze offensive/defensive stances
-   - Enable pre-snap formation identification
-
-### Long-Term Research Directions
-
-7. **Advanced Analytics**
-   - Player speed and acceleration calculation
-   - Distance traveled per player
-   - Heatmaps of player positioning
-   - Formation recognition (I-formation, shotgun, etc.)
-   - Route running analysis for receivers
-
-8. **Event Detection**
-   - Automatic detection of: snap, tackle, pass, catch, touchdown
-   - Play segmentation (identify start/end of each play)
-   - Highlight generation based on key events
-
-9. **Multi-Camera Fusion**
-   - Integrate multiple camera angles
-   - 3D position reconstruction
-   - Complete field coverage even with zoomed cameras
-
-10. **Real-Time Processing**
-    - Optimize pipeline for live game analysis
-    - GPU acceleration
-    - Frame-skip strategies for real-time performance
-    - Streaming output
-
-## Installation
-
-```bash
-# Install required packages
-pip install -r requirements.txt
-```
-
-**First Run**: The YOLOv8 model (~6MB) will be automatically downloaded to your cache directory.
-
-## Usage
-
-### Basic Usage
-
-```bash
-python tracker.py
-```
-
-**Input**: `input_game.mp4` (default, configurable in script)
-**Output**: `output_analysis.mp4`
-
-### Customization
-
-Edit configuration constants in `tracker.py`:
-
-```python
-# Change input/output paths
-INPUT_VIDEO = "path/to/your/video.mp4"
-OUTPUT_VIDEO = "path/to/output.mp4"
-
-# Adjust detection sensitivity
-YOLO_CONFIDENCE = 0.4  # Lower = more detections (more false positives)
-
-# Configure team colors (MOST IMPORTANT!)
-# Use HSV color picker to find ranges for your teams
-TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))  # Blue jerseys
-TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))    # White jerseys
-```
-
-### Finding HSV Color Ranges
-
-Use online HSV color pickers or this Python snippet:
-
-```python
-import cv2
-import numpy as np
-
-# Load a frame with clear jersey view
-frame = cv2.imread('sample_frame.jpg')
-
-# Extract jersey region
-jersey = frame[y1:y2, x1:x2]
-
-# Convert to HSV
-hsv = cv2.cvtColor(jersey, cv2.COLOR_BGR2HSV)
-
-# Get average color
-avg_color = np.mean(hsv, axis=(0, 1))
-print(f"Average HSV: H={avg_color[0]}, S={avg_color[1]}, V={avg_color[2]}")
-
-# Set range as ±20 around average
-# TEAM_X_HSV_RANGE = ((H-20, S-50, V-50), (H+20, 255, 255))
-```
-
-## Output Format
-
-The output video (`output_analysis.mp4`) contains:
-
-### Left Side: Annotated Original Footage
-- Each player surrounded by a colored bounding box
-- Box color indicates team affiliation
-- Label above each box shows team and detection confidence
-- Original video resolution maintained
-
-### Right Side: Tactical Top-Down Map
-- Green field representation with yard line markings
-- Each player shown as a colored dot at their field position
-- Dot colors match team classifications
-- Real-time tactical view of player formations
-
-### Video Properties
-- **Frame Rate**: Matches input video
-- **Resolution**: Original width + field map width
-- **Format**: MP4 (H.264 codec)
-
-## Limitations & Considerations
-
-### Current Limitations
-
-1. **No Temporal Tracking**: Each frame is analyzed independently - no player ID persistence across frames
-2. **Static Homography**: Accuracy degrades if camera angle changes significantly during video
-3. **Manual Color Tuning**: HSV ranges must be manually configured for each game/team
-4. **No Ball Tracking**: Currently only detects and classifies persons, not the football
-5. **Computational Cost**: Processing is slower than real-time (acceptable for offline analysis)
-
-### Performance Expectations
-
-**Processing Speed**:
-- **Typical**: 8-15 FPS on modern CPU
-- **GPU**: 25-35 FPS with CUDA-enabled GPU
-- **Example**: 1000 frame video takes approximately 60-120 seconds
-
-### Object Tracking Performance
-
-**Method**: SimpleTracker with IoU-based matching
-
-**Tracking Metrics**:
-- **ID Persistence**: 95-99% (same player maintains same ID throughout video)
-- **Occlusion Handling**: Survives 30 frames (~0.5 seconds at 60 FPS) without detection
-- **Re-identification**: Successfully re-matches players after brief occlusions in 90-95% of cases
-- **False Track Rate**: <2% (very few ghost tracks)
-- **ID Switches**: <5% over typical 1000-frame sequence
-
-**Tracking Robustness**:
-- ✅ Handles brief occlusions (players blocked by others)
-- ✅ Survives detection failures (poor lighting, edge of frame)
-- ✅ Maintains tracks through rapid movement
-- ⚠️ May lose track after extended occlusion (>30 frames)
-- ⚠️ ID switches possible when players cross very closely
-
-### Distance Measurement Accuracy
-
-**Calibration**: Automatic from homography transformation
-- **Method**: Pixels per yard calculated from field dimensions and homography
-- **Typical**: ~5 pixels/yard on bird's eye view (600 pixels / 120 yards)
-
-**Measurement Accuracy**:
-- **Best case** (good homography, stable camera): ±3-5% error
-- **Typical case** (normal conditions): ±5-8% error
-- **After camera change** (recalculated homography): ±3-5% error
-- **Cumulative error**: ±10% over full game (errors accumulate)
-
-**Distance Tracking Performance**:
-- **Position accuracy**: ±2-3 yards per measurement
-- **Movement detection**: Resolves movements >0.5 yards reliably
-- **Total distance**: Accurate within ±5-10 yards over 100 yards of movement
-- **Update rate**: Every frame (60 FPS → 60 measurements per second)
-
-### Overall System Performance
-
-**Processing Speed** (1920×1080 video, all features enabled):
-- **CPU (Intel i7-10700)**: 8-12 FPS → 1000 frames in 83-125 seconds
-- **GPU (NVIDIA RTX 3060)**: 25-30 FPS → 1000 frames in 33-40 seconds
-- **Apple M3 Max (MPS)**: 15-20 FPS → 1000 frames in 50-66 seconds
-
-**Per-Frame Processing Breakdown**:
-| Stage | Time (CPU) | Time (GPU) | % of Total |
-|-------|-----------|-----------|------------|
-| Stadium masking | 2-3ms | 2-3ms | 3-5% |
-| YOLO detection | 25-35ms | 8-12ms | 50-60% |
-| Team classification | 3-5ms | 3-5ms | 5-10% |
-| Homography transform | <1ms | <1ms | <2% (cached!) |
-| Tracking (IoU matching) | 2-3ms | 2-3ms | 3-5% |
-| Visualization | 10-15ms | 10-15ms | 15-25% |
-| **Total per frame** | **45-65ms** | **25-40ms** | **100%** |
-
-**Accuracy vs Speed Trade-offs**:
-- **Current (accuracy priority)**: Process every frame, full resolution → 8-12 FPS CPU
-- **Balanced**: Process every 2nd frame → 16-24 FPS CPU, minimal accuracy loss
-- **Speed priority**: Process every 3rd frame → 24-36 FPS CPU, 10-15% accuracy loss
-
-**Accuracy Notes**:
-- Detection accuracy depends heavily on video quality and player visibility
-- Team classification requires distinct, visible jersey colors (improved in v2.0 with better sampling)
-- Homography accuracy requires clear, straight field lines in first frame
-- System performs best on high-quality broadcast footage
-- Camera change detection maintains accuracy even with zooms/pans (new in v2.0)
-
-## Core Goal: Understanding Player Movement
-
-The **primary and most important objective** of this system is to accurately track and measure how players move during a football game. This fundamental capability enables all downstream analytics.
-
-### Player Movement Tracking Capabilities
-
-**1. Position Tracking**:
-- Tracks each player's (x, y) position in both camera view and bird's eye view
-- Updates every frame (60 FPS = 60 position measurements per second)
-- Maintains persistent IDs so individual players can be followed throughout the game
-
-**2. Distance Measurement**:
-- Calculates total yards traveled by each player
-- Uses calibrated homography transformation for accurate yard-based measurements
-- Accumulates distance frame-by-frame:
-  ```
-  distance_moved = √((x₂-x₁)² + (y₂-y₁)²) in bird's eye coordinates
-  yards_moved = distance_moved / pixels_per_yard
-  total_yards[player_id] += yards_moved
-  ```
-
-**3. Movement Patterns**:
-- **Position trails**: Persistent dots on tactical map show where each player has been
-- **Path visualization**: Accumulated dots reveal route running, defensive coverage, blocking patterns
-- **Formation analysis**: See how offensive and defensive formations shift during plays
-
-**4. Movement Metrics** (Can be extracted from data):
-- **Total distance**: Cumulative yards traveled
-- **Average speed**: Distance / time
-- **Acceleration**: Change in speed over time  
-- **Direction changes**: Analyzing path curvature
-- **Field coverage**: Which areas of the field each player occupies
-
-### Why Player Movement is Critical
-
-Understanding player movement enables:
-- **Performance Analysis**: Which players cover the most ground?
-- **Fatigue Detection**: Distance traveled correlates with fatigue
-- **Route Analysis**: How do receivers run routes?
-- **Defensive Coverage**: How do defensive backs shadow receivers?
-- **Blocking Efficiency**: Do linemen maintain position or get pushed back?
-- **Play Recognition**: Movement patterns reveal play types
-- **Training Insights**: Identify areas for conditioning improvement
-
-**Output Format**: The system provides:
-1. **Visual**: Persistent dots on tactical map showing movement trails
-2. **Quantitative**: Yards traveled displayed per player (e.g., "ID:5 | 45.3 yd")
-3. **Temporal**: Frame-by-frame position history for detailed analysis
-
-## Project Structure
-
-```
-football_tracker/
-├── tracker.py          # Complete analysis pipeline (main script, ~1100 lines)
-├── tracker_config.py   # All configuration parameters (settings file)
-├── requirements.txt    # Python dependencies (4 packages)
-├── README.md          # This file (complete technical documentation)
-└── GETTING_STARTED.md # Quick start guide
-```
-
-**Key Files**:
-- `tracker.py`: Core processing pipeline with RobustTracker and team freezing
-- `tracker_config.py`: All tunable parameters (video paths, colors, thresholds)
-- Modify `tracker_config.py` to adjust settings without touching main code
-
-**Input**: Configure `INPUT_VIDEO` in `tracker_config.py` (default: `zoomed_game.mp4`)
-**Output**: Processed video saved as `OUTPUT_VIDEO` (default: `output_analysis.mp4`)
-
-## Technical Notes
-
-### Why Single Script?
-
-This consolidated approach offers:
-- **Simplicity**: All functionality in one place
-- **Maintainability**: Easier to understand and modify
-- **Deployment**: Single file to distribute
-- **Customization**: Easy to adjust for specific needs
-
-### Algorithm Choices
-
-**YOLOv8 over Traditional CV**:
-- Traditional: Edge detection + color segmentation fails with overlapping players
-- YOLO: Instance detection naturally handles overlaps
-- Trade-off: Slower but dramatically more accurate
-
-**Static Homography over Dynamic**:
-- Static: Calculate once, use throughout video
-- Dynamic: Recalculate each frame
-- Trade-off: Faster processing, acceptable for stable camera shots
-
-**K-Means Color Clustering**:
-- Simple, fast, interpretable
-- Works well for distinct team colors
-- Easily tunable via HSV ranges
-
-## Contributing
-
-To extend this system:
-
-1. **Add player tracking**: Integrate SORT/DeepSORT after YOLO detection
-2. **Improve team classification**: Use position context or machine learning classifier
-3. **Dynamic homography**: Detect field lines every N frames, update matrix
-4. **Ball tracking**: Add detection for sports ball class, implement possession logic
-
-## License
-
-MIT License - Free to use and modify
-
-## Acknowledgments
-
-- **YOLOv8**: Ultralytics (https://github.com/ultralytics/ultralytics)
-- **OpenCV**: Open Source Computer Vision Library
-- **COCO Dataset**: For pre-trained model weights
+# Football Play Analysis System
+
+AI 기반 컴퓨터 비전 시스템으로 미식축구 경기 영상을 분석하여 자동으로 플레이 통계를 추출하고 구조화된 JSON 데이터를 생성합니다.
+
+## 🎯 주요 기능
+
+- **선수 및 공 자동 감지 및 추적** (YOLOv8 + CLIP)
+- **팀 자동 분류** (CLIP 기반 유니폼 색상 감지 - 흰색/노란색)
+- **사이드라인 인원 자동 제외** (호모그래피 + BEV 경계 필터링)
+- **플레이 타입 자동 판정** (항상 RUN)
+- **야드 게인 자동 계산** (BEV 변환 기반)
+- **포즈 분석** (쪼그려 앉기, 움직임 감지)
+- **JSON 출력** (구조화된 플레이 데이터)
 
 ---
 
-## Quick Reference
+## 🚀 빠른 시작
+
+### 1. 설치
 
 ```bash
-# Install
+# 의존성 설치
 pip install -r requirements.txt
 
-# Run
-python tracker.py
+# CLIP 설치 (팀 분류용)
+./install_clip.sh
 
-# Output
-# → output_analysis.mp4
+# Tesseract OCR 설치 (저지 번호 인식용)
+# macOS:
+brew install tesseract
+# Ubuntu:
+sudo apt-get install tesseract-ocr
 ```
 
-**For best results**: Adjust team HSV ranges in `tracker.py` to match your footage!
+### 2. 호모그래피 캘리브레이션 (최초 1회)
+
+```bash
+python calibrate_homography.py
+```
+
+- 비디오 첫 프레임에서 필드의 4개 지점 클릭
+- 's' 키를 눌러 저장
+- `homography_matrix.npy` 파일 생성됨
+
+### 3. 비디오 분석 실행
+
+```bash
+# 비디오를 input/ 폴더에 배치
+cp your_video.mp4 input/video.mp4
+
+# 분석 실행
+python main.py
+```
+
+### 4. 결과 확인
+
+- **output/result.mp4** - 바운딩 박스와 팀 색상이 표시된 영상
+- **output/bev.mp4** - 평면도 (Bird's Eye View) 영상
+- **output/clip_summary.json** - 구조화된 플레이 데이터
 
 ---
 
-**Version**: 2.0  
-**Last Updated**: October 2025  
-**Status**: Production Ready for Offline Analysis
+## 📊 시스템 아키텍처
+
+### AI 모델 파이프라인
+
+```
+비디오 입력
+    ↓
+┌─────────────────────────────────────────┐
+│  YOLOv8 Detection (선수/공 감지)        │
+│  - 신뢰도: 선수 0.5 / 공 0.2            │
+│  - 크기 필터링: 5-300px                 │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  CLIP 분류 (팀/엔티티)                  │
+│  - 팀: 흰색=Team A / 노란색=Team B      │
+│  - 1프레임 즉시 고정 (변경 불가)        │
+│  - 프레임 간격: 30 (1초당 1번)          │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  호모그래피 변환 (BEV)                  │
+│  - 사이드라인 필터링 (50-950, 50-450)   │
+│  - 야드 계산 (20 pixels/yard)           │
+└─────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────┐
+│  PlayAnalyzer (플레이 분석)             │
+│  - 플레이 타입: 항상 RUN                │
+│  - 볼 캐리어 추적                       │
+│  - 포즈 분석 (쪼그려 앉기/움직임)       │
+└─────────────────────────────────────────┘
+    ↓
+결과 출력 (MP4 + JSON)
+```
+
+### 핵심 컴포넌트
+
+| 컴포넌트 | 파일 | 기능 |
+|---------|------|------|
+| **DetectorTracker** | detector_tracker.py | YOLOv8 감지 + CLIP 분류 통합 |
+| **CLIPClassifier** | clip_classifier.py | 팀/엔티티 분류 (1프레임 즉시 고정) |
+| **ViewTransformer** | transformer.py | 호모그래피 변환 + BEV 경계 필터링 |
+| **PlayAnalyzer** | play_analyzer.py | 플레이 분석 + 포즈 분석 |
+| **Visualizer** | visualizer.py | 영상 렌더링 (bbox, 팀 색상, BEV) |
+| **TeamClassifier** | team_classifier.py | 레거시 K-means 팀 분류 (백업) |
+
+---
+
+## ⚙️ 주요 설정 (config.py)
+
+### 공 감지 설정
+
+```python
+BALL_CONFIDENCE = 0.2           # 공 감지 임계값 (매우 낮음 - 미식축구공 감지 어려움)
+BALL_SIZE_MIN = 5               # 최소 크기 (픽셀)
+BALL_SIZE_MAX = 300             # 최대 크기 (픽셀)
+```
+
+### 추적 지속성 설정 (한 번 디텍션되면 계속 유지)
+
+```python
+MAX_TRACKING_FRAMES = 300       # 10초 동안 감지 안 돼도 track 유지
+TRACKING_IOU_THRESHOLD = 0.15   # IoU 임계값 (낮을수록 관대)
+
+# detector_tracker.py에서:
+tracker='bytetrack.yaml'        # ByteTrack 알고리즘 (안정적)
+iou=0.3                         # 겹침 30%까지 허용
+```
+
+**효과**: 한 번 감지된 선수/공은 화면에서 잠깐 가려져도 계속 추적됨
+
+### CLIP 팀 분류 설정
+
+```python
+CLIP_FRAME_INTERVAL = 30        # 30프레임마다 1번 = 1초당 1번 (30fps 기준)
+CLIP_CONFIDENCE_THRESHOLD = 0.40
+
+CLIP_TEAM_PROMPTS = [
+    "an american football player wearing a white team jersey",     # Team A (흰색)
+    "an american football player in a bright yellow team uniform", # Team B (노란색)
+    "a football referee in black and white vertical striped shirt" # Referee
+]
+```
+
+**팀 고정 메커니즘**:
+- `freeze_threshold = 1` - 첫 감지 시 즉시 고정
+- `confidence >= 0.3` - 30% 이상이면 고정
+- 한 번 고정되면 **절대 변경 불가**
+
+### BEV 필드 경계 (사이드라인 제외)
+
+```python
+BEV_FIELD_X_MIN = 50      # 왼쪽 사이드라인
+BEV_FIELD_X_MAX = 950     # 오른쪽 사이드라인
+BEV_FIELD_Y_MIN = 50      # 상단 엔드존
+BEV_FIELD_Y_MAX = 450     # 하단 (벤치/사이드라인 제외)
+```
+
+---
+
+## 🎮 사용 방법
+
+### 기본 실행
+
+```bash
+python main.py
+```
+
+### 예상 로그
+
+```
+Loading CLIP model 'ViT-B/32' on device 'cuda'...
+CLIP Team Classifier initialized with 3 team prompts
+Team freeze mechanism: IMMEDIATE (1-frame freeze)
+
+⚽ Ball detected! Track #5, conf=22%, size=25x28
+🔒 Team FROZEN: Track #1 → Team A (conf: 45%)
+🔒 Team FROZEN: Track #3 → Team B (conf: 38%)
+
+Play started: State -> PLAY_ACTIVE (RUN), Passer: 3
+Play ended: Carrier down. Tackler: 8, Yards gained: 5.20
+
+============================================================
+PLAY SUMMARY
+============================================================
+Play Type: RUN
+Yards Gained: 5.20
+Ball Carrier ID: 3
+Final State: PLAY_ENDED
+============================================================
+```
+
+### JSON 출력 형식
+
+```json
+{
+  "gameKey": "GAME_2024_001",
+  "Clips": [
+    {
+      "playType": "RUN",
+      "gainYard": 5.2,
+      "carrierInfo": {
+        "trackId": 3,
+        "jerseyNumber": "23"
+      },
+      "tacklerInfo": {
+        "trackId": 8,
+        "jerseyNumber": "Unknown"
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 🔧 문제 해결
+
+### 문제 1: 공이 감지 안 됨
+
+**해결책**:
+```python
+# config.py
+BALL_CONFIDENCE = 0.15  # 0.2 → 0.15로 더 낮춤
+```
+
+### 문제 2: 팀이 계속 바뀜
+
+**원인**: 신뢰도가 0.3 미만
+**해결책**:
+1. CLIP 프롬프트를 더 구체적으로 수정
+2. 신뢰도 임계값 낮추기:
+```python
+# clip_classifier.py:315
+if all(h[1] >= 0.2 for h in history):  # 0.3 → 0.2
+```
+
+### 문제 3: 사이드라인 인원이 감지됨
+
+**해결책**: BEV 경계 좁히기
+```python
+# config.py
+BEV_FIELD_X_MIN = 100  # 50 → 100
+BEV_FIELD_X_MAX = 900  # 950 → 900
+BEV_FIELD_Y_MAX = 400  # 450 → 400
+```
+
+### 문제 4: yards gained가 0으로 나옴
+
+**원인**: 플레이가 끝나지 않음 (PLAY_ENDED 상태 도달 안 함)
+**해결책**:
+1. 비디오가 플레이 끝까지 포함하는지 확인
+2. 포즈 감지 임계값 조정 (play_analyzer.py:185)
+
+### 문제 5: 호모그래피 매트릭스 오류
+
+```bash
+FileNotFoundError: homography_matrix.npy
+```
+
+**해결책**:
+```bash
+python calibrate_homography.py
+```
+
+---
+
+## 📖 핵심 개념
+
+### 1. 팀 고정 메커니즘
+
+```
+프레임 1: Track #1 감지
+  ├─ CLIP 분류: Team A (conf: 45%)
+  ├─ 신뢰도 >= 0.3? YES
+  └─ 🔒 즉시 고정! (1프레임)
+
+프레임 2-끝: Track #1 재감지
+  └─ frozen_teams에 있음 → 절대 변경 불가
+```
+
+### 2. 플레이 타입 판정
+
+**현재 로직**: **항상 RUN**
+
+```python
+# play_analyzer.py
+self.play_type = 'RUN'  # 기본값 (변경 불가)
+```
+
+모든 플레이는 RUN입니다. PASS 자동 감지는 제거되었습니다.
+
+### 3. BEV 좌표계
+
+```
+BEV Canvas (1000x500 pixels)
+┌─────────────────────────────┐ y=0   (상단)
+│   x=50                x=950 │
+│   ↓                      ↓  │
+├───┐                    ┌───┤
+│   │  경기장 (on-field) │   │
+│   │  BEV_FIELD_X_MIN   │   │
+│   │  ~                 │   │
+│   │  BEV_FIELD_X_MAX   │   │
+│   │                    │   │
+├───┘                    └───┤ y=450 (BEV_FIELD_Y_MAX)
+│  사이드라인 (제외)          │
+└─────────────────────────────┘ y=500 (하단)
+```
+
+### 4. 야드 계산
+
+```python
+pixel_distance = euclidean(start_bev, end_bev)
+yards_gained = pixel_distance / PIXELS_PER_YARD_BEV  # 20 pixels/yard
+
+# 예시: 100 pixels 이동 = 5 yards
+```
+
+### 5. 포즈 분석
+
+**쪼그려 앉기 감지**:
+```python
+hip_height = avg_hip_y - avg_shoulder_y
+knee_bend = avg_knee_y - avg_hip_y
+
+if hip_height < knee_bend * 0.7:
+    stance = 'CROUCHED'  # PRE_SNAP 자세
+```
+
+**움직임 감지**:
+```python
+speed = distance_moved / PIXELS_PER_YARD_BEV  # yards/frame
+
+if speed > 0.5:
+    is_moving = True
+```
+
+---
+
+## 🎓 고급 설정
+
+### CLIP 프롬프트 커스터마이징
+
+게임마다 유니폼 색상이 다르면 프롬프트 수정:
+
+```python
+# config.py
+CLIP_TEAM_PROMPTS = [
+    "an american football player wearing a bright red team jersey with white numbers",
+    "an american football player in a dark blue uniform with yellow helmet",
+    "a football referee in black and white vertical striped shirt"
+]
+```
+
+### 포즈 분석 활용 (main.py 추가 가능)
+
+```python
+# 쪼그려 있는 선수 필터링
+if pose_result:
+    posture = analyzer.analyze_player_posture(pose_result)
+    if posture['is_crouching']:
+        print(f"Player {track_id} is in PRE_SNAP stance")
+
+# 움직임 기반 분석
+movement = analyzer.detect_player_movement(track_id, bev_pos)
+if movement['is_moving']:
+    print(f"Player {track_id} moving at {movement['speed']:.2f} y/f")
+```
+
+### 프레임 간격 조정
+
+더 빠른 감지 (더 많은 계산):
+```python
+CLIP_FRAME_INTERVAL = 15  # 30 → 15 (0.5초당 1번)
+```
+
+더 느린 감지 (더 적은 계산):
+```python
+CLIP_FRAME_INTERVAL = 60  # 30 → 60 (2초당 1번)
+```
+
+---
+
+## 📋 버전 히스토리
+
+### V3 (현재) - 2024
+**주요 변경사항**:
+- ✅ **플레이 타입 항상 RUN** (PASS 자동 감지 완전 제거)
+- ✅ **팀 1프레임 즉시 고정** (freeze_threshold: 2 → 1)
+- ✅ **프레임 간격 30** (1초당 1번 감지)
+- ✅ **공 임계값 0.2** (이전 0.3)
+- ✅ **공 크기 범위 5-300px** (이전 10-200px)
+- ✅ **포즈 분석 메서드 추가** (쪼그려 앉기, 움직임)
+- ✅ **추적 지속성 강화** (한 번 디텍션되면 10초간 유지)
+
+**핵심 원칙**:
+- "던지지 않으면 모두 RUN"
+- "처음 1번 감지 후 팀 고정"
+
+### V2 (이전)
+- 높이 기반 PASS 감지 (제거됨)
+- 2프레임 팀 고정 (1프레임으로 변경)
+- 프레임 간격 5 (30으로 변경)
+
+### V1 (초기)
+- K-means 팀 분류만 사용
+- CLIP 미통합
+- 수동 사이드라인 제외
+
+---
+
+## 🛠️ 개발자 가이드
+
+### 주요 파일 구조
+
+```
+projects/
+├── main.py                    # 메인 실행 파일
+├── config.py                  # 중앙 설정 파일 ⭐
+├── detector_tracker.py        # YOLO + CLIP 통합
+├── clip_classifier.py         # CLIP 팀/엔티티 분류 ⭐
+├── play_analyzer.py           # 플레이 분석 + 포즈 분석 ⭐
+├── transformer.py             # 호모그래피 + BEV 필터링
+├── visualizer.py              # 영상 렌더링
+├── team_classifier.py         # 레거시 K-means (백업)
+├── number_recognizer.py       # Tesseract OCR
+├── calibrate_homography.py    # 캘리브레이션 도구
+├── input/                     # 입력 비디오
+├── output/                    # 출력 파일
+│   ├── result.mp4            # 주석이 달린 영상
+│   ├── bev.mp4               # 평면도 영상
+│   └── clip_summary.json     # 플레이 데이터
+└── homography_matrix.npy      # 변환 매트릭스
+```
+
+### 코드 수정 가이드
+
+| 수정 목적 | 파일 | 라인 |
+|-----------|------|------|
+| 공 감지 임계값 | config.py | 36 |
+| 팀 색상 프롬프트 | config.py | 181-184 |
+| 프레임 간격 | config.py | 167 |
+| 팀 고정 속도 | clip_classifier.py | 216 |
+| 팀 고정 신뢰도 | clip_classifier.py | 315 |
+| BEV 경계 | config.py | 134-137 |
+| 플레이 타입 로직 | play_analyzer.py | 27, 132 |
+| 포즈 임계값 | play_analyzer.py | 340 |
+
+---
+
+## ⚠️ 알려진 제약사항
+
+1. **플레이 타입**: 항상 RUN (PASS 감지 안 됨)
+2. **1플레이 처리**: 한 번에 1개 플레이만 처리 (배치 처리 불가)
+3. **호모그래피 필수**: 실행 전 캘리브레이션 필수
+4. **사이드뷰 영상**: 포즈 감지 정확도 낮을 수 있음
+5. **저지 번호**: OCR 정확도 제한적 (측면 영상)
+6. **팀 고정**: 첫 감지가 틀리면 영구적으로 잘못된 팀 할당
+
+---
+
+## 📚 참고 자료
+
+### 사용 기술
+- **YOLOv8**: https://github.com/ultralytics/ultralytics
+- **OpenAI CLIP**: https://github.com/openai/CLIP
+- **OpenCV**: https://opencv.org/
+- **Tesseract OCR**: https://github.com/tesseract-ocr/tesseract
+
+### 핵심 알고리즘
+- **호모그래피 변환**: `cv2.perspectiveTransform()`
+- **CLIP Zero-Shot 분류**: 텍스트 프롬프트 기반 이미지 분류
+- **COCO 키포인트**: 17개 신체 포인트 (YOLOv8-pose)
+- **유클리드 거리**: `scipy.spatial.distance.euclidean()`
+
+---
+
+## 🤝 기여 및 지원
+
+문제가 발생하면:
+1. 로그 메시지 확인 (⚽ Ball detected, 🔒 Team FROZEN 등)
+2. 설정 파일 (config.py) 검토
+3. 호모그래피 매트릭스 재캘리브레이션
+4. BEV 경계 조정
+
+---
+
+**시스템 버전**: V3 (2024)
+**핵심 원칙**: "던지지 않으면 모두 RUN" + "처음 1번 감지 후 팀 고정"
+**프레임 간격**: 30 (1초당 1번 감지)
+**팀 고정**: 1프레임 즉시 고정 (변경 불가)

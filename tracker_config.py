@@ -21,6 +21,11 @@ OUTPUT_QUALITY = 95    # 0-100 (높을수록 고화질)
 YOLO_MODEL = "yolov8n.pt"
 YOLO_CONFIDENCE = 0.5  # 탐지 신뢰도 (0.3-0.7)
 
+# YOLO Tracking parameters
+# ByteTrack 설정은 bytetrack_extended.yaml 파일에서 관리
+# track_buffer=300: Detection 실패 시 Kalman filter로 10초 동안 track 유지
+DETECTION_EVERY_N_FRAMES = 90  # 상태 로깅 간격 (실제 detection은 매 프레임)
+
 # 공 탐지 설정
 ENABLE_BALL_DETECTION = True     # 공 탐지 활성화
 BALL_CONFIDENCE = 0.3           # 공 탐지 신뢰도 (낮게 설정)
