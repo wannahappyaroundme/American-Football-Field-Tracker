@@ -14,24 +14,16 @@ from config import (
     VIDEO_OUTPUT_PATH,
     BEV_OUTPUT_PATH,
     JSON_OUTPUT_PATH,
-    POSE_MODEL_PATH,
-    ENABLE_CLIP_CLASSIFICATION,
-    ENABLE_CLIP_ENTITY_FILTERING,
-    ENABLE_CLIP_TEAM_CLASSIFICATION,
-    CLASS_ID_PERSON
+    CLASS_ID_PERSON,
+    DETECTION_CONFIDENCE_THRESHOLD,
+    BALL_CONFIDENCE,
+    TRACKING_IOU_THRESHOLD,
+    DETECTION_EVERY_N_FRAMES,
+    TEAM_A_HSV_RANGE,
+    TEAM_B_HSV_RANGE,
+    REFEREE_HSV_RANGE,
+    ENABLE_CLIP_TEAM_CLASSIFICATION  # ⭐ PHASE 2: CLIP support
 )
-
-# Import CLIP classifiers if enabled
-if ENABLE_CLIP_CLASSIFICATION:
-    try:
-        from clip_classifier import CLIPEntityClassifier, CLIPTeamClassifier
-        CLIP_AVAILABLE = True
-    except ImportError as e:
-        print(f"Warning: CLIP not available. Please install dependencies: pip install -r requirements.txt")
-        print(f"Error: {e}")
-        CLIP_AVAILABLE = False
-else:
-    CLIP_AVAILABLE = False
 
 # Manual metadata - placeholders for game and clip information
 MANUAL_METADATA = {
@@ -63,45 +55,39 @@ def main():
     Main function to run the football play analysis pipeline.
     """
     print("="*60)
-    print("Football Play Analysis System")
+    print("Football Play Analysis System - SIMPLIFIED")
     print("="*60)
 
-    # Initialize CLIP classifiers if available
-    clip_entity_classifier = None
-    clip_team_classifier = None
+    # Initialize ViewTransformer first (needed for BEV masking)
+    print("\n[1/6] Initializing components...")
+    transformer = ViewTransformer()
+    print("✓ ViewTransformer loaded")
 
-    if CLIP_AVAILABLE:
-        print("\n[1/7] Initializing CLIP classifiers...")
-        try:
-            if ENABLE_CLIP_ENTITY_FILTERING:
-                clip_entity_classifier = CLIPEntityClassifier()
-                print("✓ CLIP entity classifier loaded")
-
-            if ENABLE_CLIP_TEAM_CLASSIFICATION:
-                clip_team_classifier = CLIPTeamClassifier()
-                print("✓ CLIP team classifier loaded")
-        except Exception as e:
-            print(f"Warning: Failed to load CLIP classifiers: {e}")
-            print("Continuing without CLIP classification...")
-            clip_entity_classifier = None
-            clip_team_classifier = None
-
-    # Initialize detection and pose models
-    print("\n[2/7] Loading YOLO models...")
-    detector = DetectorTracker(clip_classifier=clip_entity_classifier)
-    pose_model = YOLO(POSE_MODEL_PATH)
-    print(f"Loaded pose model from {POSE_MODEL_PATH}")
+    # Initialize detection model with BEV masking support
+    print("\n[2/6] Loading YOLO model...")
+    detector = DetectorTracker(view_transformer=transformer)  # ⭐ NEW: BEV masking enabled
+    print("✓ YOLO detection model loaded")
 
     # Initialize other components
-    print("\n[3/7] Initializing components...")
-    transformer = ViewTransformer()
+    print("\n[3/6] Initializing other components...")
     analyzer = PlayAnalyzer()
     visualizer = Visualizer()
     recognizer = NumberRecognizer()
-    team_classifier = TeamClassifier(clip_team_classifier=clip_team_classifier)
+
+    # ⭐ PHASE 2: Initialize CLIP team classifier if enabled
+    if ENABLE_CLIP_TEAM_CLASSIFICATION:
+        from clip_classifier import CLIPTeamClassifier
+        clip_team_classifier = CLIPTeamClassifier()
+        team_classifier = TeamClassifier(clip_team_classifier=clip_team_classifier)
+        print("✓ CLIP team classification ENABLED")
+    else:
+        team_classifier = TeamClassifier()  # HSV-only mode
+        print("✓ Color-based team classification (HSV)")
+
+    print("✓ Components initialized")
 
     # Set up video capture and writers
-    print("\n[4/7] Setting up video input/output...")
+    print("\n[4/6] Setting up video input/output...")
     cap = cv2.VideoCapture(VIDEO_INPUT_PATH)
 
     if not cap.isOpened():
@@ -113,8 +99,28 @@ def main():
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps if fps > 0 else 0
 
-    print(f"Video properties: {width}x{height} @ {fps} FPS, {total_frames} frames")
+    print(f"\nVideo properties:")
+    print(f"  Resolution: {width}x{height}")
+    print(f"  FPS: {fps}")
+    print(f"  Total frames: {total_frames}")
+    print(f"  Duration: {duration:.1f} seconds")
+
+    print(f"\nSystem Configuration:")
+    print(f"  Detection confidence: {DETECTION_CONFIDENCE_THRESHOLD} (persons), {BALL_CONFIDENCE} (ball)")
+    print(f"  ByteTrack: 900-frame buffer (30 seconds @ 30fps)")
+    print(f"  IoU threshold: {TRACKING_IOU_THRESHOLD} (low = better occlusion handling)")
+    print(f"  Log interval: every {DETECTION_EVERY_N_FRAMES} frames")
+
+    print(f"\nTeam Classification (HSV ranges):")
+    print(f"  Team A (Yellow): H={TEAM_A_HSV_RANGE[0][0]}-{TEAM_A_HSV_RANGE[1][0]}, "
+          f"S={TEAM_A_HSV_RANGE[0][1]}-{TEAM_A_HSV_RANGE[1][1]}, "
+          f"V={TEAM_A_HSV_RANGE[0][2]}-{TEAM_A_HSV_RANGE[1][2]}")
+    print(f"  Team B (White): H={TEAM_B_HSV_RANGE[0][0]}-{TEAM_B_HSV_RANGE[1][0]}, "
+          f"S={TEAM_B_HSV_RANGE[0][1]}-{TEAM_B_HSV_RANGE[1][1]}, "
+          f"V={TEAM_B_HSV_RANGE[0][2]}-{TEAM_B_HSV_RANGE[1][2]}")
+    print(f"  Referee: Stripe detection (std_dev > 70, STRICT!) + HSV backup")
 
     # Create video writers
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -122,8 +128,15 @@ def main():
     out_bev = cv2.VideoWriter(BEV_OUTPUT_PATH, fourcc, fps, (1000, 500))
 
     # Main processing loop
-    print("\n[5/7] Processing video frames...")
+    print("\n[5/6] Processing video frames...")
+    print("-" * 60)
     frame_count = 0
+    sampled_players = set()  # 이미 샘플링한 선수 ID 저장 (한번만 샘플링)
+
+    # Tracking statistics
+    seen_track_ids = set()
+    team_classification_count = {'Team A': 0, 'Team B': 0, 'Referee': 0, 'Unknown': 0}
+    ball_detections = 0
 
     while True:
         ret, frame = cap.read()
@@ -134,54 +147,77 @@ def main():
 
         frame_count += 1
 
-        # Track objects in the frame (with CLIP entity filtering)
+        # Track objects in the frame (pure YOLO + ByteTrack)
         tracks = detector.track_frame(frame)
 
-        # Classify teams using CLIP if enabled (프리즈된 팀은 건너뛰기)
-        if clip_team_classifier and frame_count % 10 == 0:  # Every 10 frames
-            for track in tracks:
-                if track.get('entity_type') == 'player':  # Only classify players
-                    track_id = track['track_id']
+        # Count active tracks per frame
+        active_person_tracks = 0
+        active_ball_tracks = 0
 
-                    # 이미 프리즈된 팀은 재분류 건너뛰기 (성능 최적화)
-                    if clip_team_classifier.is_frozen(track_id):
-                        continue
+        # ⭐ tracker.py 방식: 매 프레임마다 즉시 팀 할당!
+        for track in tracks:
+            track_id = track['track_id']
+            seen_track_ids.add(track_id)
 
-                    # 새 선수 또는 프리즈 안 된 선수만 분류
-                    x1, y1, x2, y2 = map(int, track['bbox'])
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        team_classifier.assign_team_with_clip(track_id, crop)
+            if track['class_id'] == CLASS_ID_PERSON:
+                active_person_tracks += 1
 
-        # Update analyzer with new tracks
-        analyzer.update_tracks(tracks, transformer)
+                # 이미 할당된 선수는 스킵 (한번만!)
+                if track_id in sampled_players:
+                    continue
 
-        # Pose detection for ball carrier (if play is active)
-        if analyzer.ball_carrier_id is not None and analyzer.state != 'PLAY_ENDED':
-            # Find the ball carrier's track
-            ball_carrier_track = None
-            for track in tracks:
-                if track['track_id'] == analyzer.ball_carrier_id:
-                    ball_carrier_track = track
-                    break
+                x1, y1, x2, y2 = map(int, track['bbox'])
 
-            if ball_carrier_track is not None:
-                # Crop the frame to ball carrier's bbox
-                bbox = ball_carrier_track['bbox']
-                x1, y1, x2, y2 = map(int, bbox)
-
-                # Ensure valid crop coordinates
+                # Ensure valid crop
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(width, x2), min(height, y2)
 
                 if x2 > x1 and y2 > y1:
-                    crop_frame = frame[y1:y2, x1:x2]
+                    crop = frame[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        # 즉시 팀 분류 (HSV 범위 기반 + 위치 기반 재사용)
+                        team_label, team_color = team_classifier.classify_team_instantly(
+                            track_id, crop, [x1, y1, x2, y2]
+                        )
+                        sampled_players.add(track_id)  # 고정!
+                        team_classification_count[team_label] += 1
 
-                    # Run pose detection on cropped frame
-                    pose_results = pose_model(crop_frame, verbose=False)
+                        if frame_count % DETECTION_EVERY_N_FRAMES == 0:  # 설정된 간격마다 로그
+                            print(f"  👕 Player #{track_id} → {team_label}")
+            else:
+                # Ball track
+                active_ball_tracks += 1
+                ball_detections += 1
 
-                    # Check for play end using pose keypoints
-                    analyzer.check_play_end(pose_results, tracks, transformer)
+        # Update analyzer with new tracks
+        analyzer.update_tracks(tracks, transformer)
+
+        # DISABLED: Pose detection for ball carrier - causes overhead and flickering
+        # if analyzer.ball_carrier_id is not None and analyzer.state != 'PLAY_ENDED':
+        #     # Find the ball carrier's track
+        #     ball_carrier_track = None
+        #     for track in tracks:
+        #         if track['track_id'] == analyzer.ball_carrier_id:
+        #             ball_carrier_track = track
+        #             break
+        #
+        #     if ball_carrier_track is not None:
+        #         # Crop the frame to ball carrier's bbox
+        #         bbox = ball_carrier_track['bbox']
+        #         x1, y1, x2, y2 = map(int, bbox)
+        #
+        #         # Ensure valid crop coordinates
+        #         x1, y1 = max(0, x1), max(0, y1)
+        #         x2, y2 = min(width, x2), min(height, y2)
+        #
+        #         if x2 > x1 and y2 > y1:
+        #             crop_frame = frame[y1:y2, x1:x2]
+        #
+        #             # Run pose detection on cropped frame
+        #             pose_results = pose_model(crop_frame, verbose=False)
+        #
+        #             # Check for play end using pose keypoints
+        #             analyzer.check_play_end(pose_results, tracks, transformer)
 
         # Draw annotations on the frame
         annotated_frame = visualizer.draw_annotations(
@@ -205,8 +241,11 @@ def main():
         out_bev.write(bev_frame)
 
         # Print progress
-        if frame_count % 30 == 0:
-            print(f"Processed {frame_count}/{total_frames} frames - State: {analyzer.state}")
+        if frame_count % DETECTION_EVERY_N_FRAMES == 0:
+            progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+            print(f"Frame {frame_count}/{total_frames} ({progress:.1f}%): "
+                  f"{active_person_tracks} players, {active_ball_tracks} ball(s), "
+                  f"{len(seen_track_ids)} total IDs, State: {analyzer.state}")
 
         # Break if play has ended
         if analyzer.state == 'PLAY_ENDED':
@@ -219,21 +258,113 @@ def main():
     out_bev.release()
     cv2.destroyAllWindows()
 
-    print(f"\n[6/7] Video processing complete.")
-    print(f"Annotated video saved to: {VIDEO_OUTPUT_PATH}")
-    print(f"BEV video saved to: {BEV_OUTPUT_PATH}")
+    # Calculate metrics
+    ball_detection_rate = ball_detections / frame_count if frame_count > 0 else 0
 
-    # Print team classification results
-    if clip_team_classifier:
-        print("\n👥 Team Classification Results:")
-        team_counts = {}
-        for track_id, team in clip_team_classifier.player_teams.items():
-            team_counts[team] = team_counts.get(team, 0) + 1
-        for team, count in team_counts.items():
-            print(f"  {team}: {count} players")
+    print("\n" + "-" * 60)
 
-        frozen_count = len(clip_team_classifier.frozen_teams)
-        print(f"  Frozen teams: {frozen_count} players")
+    # ⭐ POST-PROCESSING: Select top 1-4 referees and reclassify others to Team A/B
+    if ENABLE_CLIP_TEAM_CLASSIFICATION and hasattr(team_classifier, 'clip_classifier') and team_classifier.clip_classifier:
+        print("\n🔄 POST-PROCESSING: Referee selection (keep top 1-4 referees, reclassify rest to Team A/B)...")
+
+        # Get top 4 referees by confidence (실제 게임에서 1-4명)
+        top_referee_ids = team_classifier.clip_classifier.get_top_referees(max_refs=4)
+
+        # Reclassify ALL referees that aren't in the top 4 to Team A or Team B using HSV
+        reclassified_count = 0
+        reclassified_to_a = 0
+        reclassified_to_b = 0
+
+        # Debug: Print all referees found
+        all_referees = [tid for tid, team in team_classifier.player_teams.items() if team == 'Referee']
+        print(f"\n  Debug: Found {len(all_referees)} total referee IDs")
+        print(f"  Debug: Top 4 referee IDs to keep: {sorted(top_referee_ids)}")
+
+        for track_id, current_team in list(team_classifier.player_teams.items()):
+            # If classified as Referee but NOT in top 4, reclassify to Team A/B using HSV
+            if current_team == 'Referee' and track_id not in top_referee_ids:
+                # Get color samples for this track_id
+                track_samples = [s for s in team_classifier.color_samples if s['track_id'] == track_id]
+
+                if track_samples:
+                    # Use the first available color sample for HSV reclassification
+                    hsv_color = track_samples[0]['color']
+                    h, s, v = hsv_color
+
+                    # HSV range check to determine Team A (Yellow) or Team B (White)
+                    # Team A: Yellow (H: 18-35, S: 60-255, V: 100-255)
+                    if 18 <= h <= 35 and s >= 60 and v >= 100:
+                        new_team = 'Team A'
+                        reclassified_to_a += 1
+                    # Team B: White (H: any, S: 0-40, V: 160-255)
+                    elif s <= 40 and v >= 160:
+                        new_team = 'Team B'
+                        reclassified_to_b += 1
+                    else:
+                        # Default to Team B if neither matches clearly
+                        new_team = 'Team B'
+                        reclassified_to_b += 1
+
+                    team_classifier.player_teams[track_id] = new_team
+                    reclassified_count += 1
+                else:
+                    # No color samples, mark as Unknown
+                    team_classifier.player_teams[track_id] = 'Unknown'
+                    reclassified_count += 1
+
+        print(f"\n  Reclassified {reclassified_count} false-positive referees:")
+        print(f"    → Team A: {reclassified_to_a}")
+        print(f"    → Team B: {reclassified_to_b}")
+
+        # Recalculate team counts from player_teams
+        final_team_counts = {'Team A': 0, 'Team B': 0, 'Referee': 0, 'Unknown': 0}
+        for team in team_classifier.player_teams.values():
+            final_team_counts[team] = final_team_counts.get(team, 0) + 1
+
+        print(f"  Final team counts (unique players):")
+        print(f"    Team A: {final_team_counts['Team A']}")
+        print(f"    Team B: {final_team_counts['Team B']}")
+        print(f"    Referee: {final_team_counts['Referee']} ✓ TARGET: 1-4")
+        print(f"    Unknown: {final_team_counts['Unknown']}")
+
+    print("\n[6/6] Video processing complete.")
+    print(f"\nOutput files:")
+    print(f"  Annotated video: {VIDEO_OUTPUT_PATH}")
+    print(f"  BEV video: {BEV_OUTPUT_PATH}")
+
+    print(f"\nProcessing Statistics:")
+    print(f"  Total frames processed: {frame_count}")
+    print(f"  Duration: {frame_count/fps:.1f} seconds")
+    print(f"  Processing speed: {frame_count/(frame_count/fps):.1f} FPS effective")
+
+    print(f"\nTracking Statistics:")
+    print(f"  Total unique track IDs: {len(seen_track_ids)}")
+    print(f"  Expected: 30-50 IDs (22 players + refs + sideline)")
+    if 20 <= len(seen_track_ids) <= 60:
+        print(f"  ✓ PASS: Reasonable number of IDs")
+    else:
+        print(f"  ✗ WARNING: {len(seen_track_ids)} IDs (expected 30-50)")
+
+    print(f"\nBall Detection:")
+    print(f"  Ball detections: {ball_detections} frames")
+    print(f"  Detection rate: {ball_detection_rate:.1%}")
+    print(f"  Confidence threshold: {BALL_CONFIDENCE}")
+
+    print(f"\nTeam Classification (HSV-based):")
+    print(f"  Total players classified: {len(sampled_players)}")
+    print(f"  Team A (Yellow): {team_classification_count['Team A']} players")
+    print(f"  Team B (White): {team_classification_count['Team B']} players")
+    print(f"  Referee: {team_classification_count['Referee']} players")
+    print(f"  Unknown: {team_classification_count['Unknown']} players")
+
+    # Team classification accuracy check
+    total_classified = len(sampled_players)
+    known_percentage = ((total_classified - team_classification_count['Unknown']) / total_classified * 100) if total_classified > 0 else 0
+    print(f"  Classification success rate: {known_percentage:.1f}%")
+    if known_percentage >= 80:
+        print(f"  ✓ PASS: >80% players classified")
+    else:
+        print(f"  ✗ WARNING: <80% classification rate")
 
     # Generate JSON summary
     print("\n[7/7] Generating JSON summary...")
@@ -293,18 +424,37 @@ def main():
     with open(JSON_OUTPUT_PATH, 'w', encoding='utf-8') as f:
         json.dump(final_json, f, ensure_ascii=False, indent=2)
 
-    print(f"JSON summary saved to: {JSON_OUTPUT_PATH}")
+    print(f"  JSON output: {JSON_OUTPUT_PATH}")
 
-    # Print summary
+    # Print play summary
     print("\n" + "="*60)
-    print("PLAY SUMMARY")
+    print("PLAY ANALYSIS SUMMARY")
     print("="*60)
-    print(f"Play Type: {summary_data['playType']}")
-    print(f"Yards Gained: {summary_data['gainYard']:.2f}")
-    print(f"Ball Carrier ID: {summary_data['car_id']}")
-    print(f"Passer ID: {summary_data['passer_id']}")
-    print(f"Tackler ID: {summary_data['tkl_id']}")
-    print(f"Final State: {summary_data['state']}")
+
+    print(f"\nPlay Details:")
+    print(f"  Play Type: {summary_data['playType']}")
+    print(f"  Yards Gained: {summary_data['gainYard']:.2f}")
+    print(f"  Final State: {summary_data['state']}")
+
+    print(f"\nKey Players:")
+    print(f"  Ball Carrier ID: {summary_data['car_id']}")
+    if summary_data['car_id'] and summary_data['car_id'] in team_classifier.player_teams:
+        carrier_team = team_classifier.player_teams[summary_data['car_id']]
+        print(f"    Team: {carrier_team}")
+    print(f"  Passer ID: {summary_data['passer_id']}")
+    print(f"  Tackler ID: {summary_data['tkl_id']}")
+
+    print(f"\nSystem Performance Summary:")
+    print(f"  ✓ Video processed: {frame_count} frames in {frame_count/fps:.1f}s")
+    print(f"  ✓ Players tracked: {len(seen_track_ids)} unique IDs")
+    print(f"  ✓ Players classified: {len(sampled_players)} players")
+    print(f"  ✓ Team A: {team_classification_count['Team A']}, "
+          f"Team B: {team_classification_count['Team B']}, "
+          f"Referee: {team_classification_count['Referee']}")
+    print(f"  ✓ Ball detection rate: {ball_detection_rate:.1%}")
+
+    print("\n" + "="*60)
+    print("All outputs saved successfully!")
     print("="*60)
 
 

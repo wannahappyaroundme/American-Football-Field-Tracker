@@ -20,12 +20,12 @@ OUTPUT_QUALITY = 100    # 0-100 (higher = better quality)
 # YOLO DETECTION
 # ============================================================================
 
-DETECTION_MODEL_PATH = 'yolov8n.pt'
-POSE_MODEL_PATH = 'yolov8n-pose.pt'
+DETECTION_MODEL_PATH = 'yolo11n.pt'  # UPGRADED: yolov8n → yolo11n (22% fewer params, better small object detection)
+POSE_MODEL_PATH = 'yolo11n-pose.pt'  # UPGRADED: yolov8n-pose → yolo11n-pose
 
-# Detection confidence thresholds
-YOLO_CONFIDENCE = 0.5  # 일반 탐지 신뢰도 (0.3-0.7)
-DETECTION_CONFIDENCE_THRESHOLD = 0.5  # 기존 코드 호환성
+# Detection confidence thresholds (PHASE 3: Back to 0.3 for better detection coverage)
+YOLO_CONFIDENCE = 0.3  # 일반 탐지 신뢰도 (ByteTrack + 3-frame continuity handle IDs)
+DETECTION_CONFIDENCE_THRESHOLD = 0.3  # 기존 코드 호환성
 
 # YOLO Tracking parameters
 # ByteTrack 설정은 bytetrack_extended.yaml 파일에서 관리
@@ -36,11 +36,15 @@ DETECTION_EVERY_N_FRAMES = 90  # 상태 로깅 간격 (실제 detection은 매 �
 CLASS_ID_PERSON = 0
 CLASS_ID_BALL = 32
 
-# Ball detection
+# Ball detection (PHASE 2.0: YOLO11 + 최적화된 임계값 0.1% → 10-30%)
 ENABLE_BALL_DETECTION = True
-BALL_CONFIDENCE = 0.2  # 공 탐지는 매우 낮게 설정 (미식축구공 모양 감지 어려움)
+BALL_CONFIDENCE = 0.10  # 공 탐지 신뢰도 (YOLO11: 0.05 → 0.10, better detection = higher threshold)
+BALL_MIN_SIZE = 5  # 최소 공 크기 (RELAXED: 10 → 5 pixels, 멀리 있는 공도 감지)
+BALL_MAX_SIZE = 150  # 최대 공 크기 (RELAXED: 120 → 150 pixels, 매우 근접 촬영)
+BALL_ASPECT_RATIO_MIN = 0.5  # 최소 종횡비 (RELAXED: 0.7 → 0.5, 다양한 각도)
+BALL_ASPECT_RATIO_MAX = 3.0  # 최대 종횡비 (RELAXED: 2.5 → 3.0, 미식축구 타원형)
 BALL_COLOR = (0, 255, 255)  # Yellow (BGR)
-BALL_CARRIER_COLOR = (0, 0, 255)  # Red (BGR)
+BALL_CARRIER_COLOR = (0, 165, 255)  # Orange (BGR) - 주황색으로 볼 캐리어 표시
 
 # ============================================================================
 # STADIUM/FIELD RECOGNITION (경기장 인식 - 핵심!)
@@ -86,9 +90,13 @@ UNKNOWN_COLOR = (128, 128, 128) # Gray (회색 - 팀 미배정)
 PLAYER_COLOR = (255, 0, 0)      # Blue (기존 코드 호환성)
 
 # Fixed HSV ranges (backup for manual classification)
-TEAM_A_HSV_RANGE = ((90, 50, 50), (130, 255, 255))    # Blue
-TEAM_B_HSV_RANGE = ((0, 0, 180), (180, 30, 255))      # White
-REFEREE_HSV_RANGE = ((0, 0, 0), (180, 255, 60))       # Black
+# 실제 비디오 색상에 맞게 조정
+# Team A: 노란색 상의 + 흰색 하의
+# Team B: 흰색 상의 + 검은색 하의
+# Referee: 검은색/흰색 줄무늬 + 검은색 하의 (줄무늬 패턴으로 우선 감지)
+TEAM_A_HSV_RANGE = ((18, 60, 100), (35, 255, 255))    # Yellow/Gold (노란색 상의, H범위 좁힘)
+TEAM_B_HSV_RANGE = ((0, 0, 160), (180, 40, 255))      # White (FIXED: V 190→160, S 25→40, 그림자/로고 허용)
+REFEREE_HSV_RANGE = ((0, 0, 40), (180, 35, 170))      # Black/White (ADJUSTED: V max 170, S max 35, Team B 겹침 방지)
 
 # ============================================================================
 # OBJECT TRACKING (객체 추적 - 핵심!)
@@ -133,13 +141,14 @@ PIXELS_PER_YARD_BEV = 20  # BEV 픽셀당 야드 (1000 / 50 = 20)
 BEV_LEFT_YARD_LINE = 0
 BEV_DIRECTION = 'LEFT_TO_RIGHT'
 
-# BEV field boundaries (호모그래피 기반 경기장 필터링 - 활성화!)
-# 경기장 밖 사람들(사이드라인 코치, 카메라맨 등)을 제외하기 위한 경계 설정
+# BEV field boundaries (⭐ EXPANDED for 25-30 player detection)
+# 이전: 50-450 픽셀 (너무 좁아서 6-14명만 검출)
+# 현재: 0-500 픽셀 (전체 필드 커버, CLIP이 필터링 담당)
 # BEV 캔버스: 1000x500 픽셀
 BEV_FIELD_X_MIN = 50      # 왼쪽 사이드라인 마진 (픽셀)
 BEV_FIELD_X_MAX = 950     # 오른쪽 사이드라인 마진 (픽셀)
-BEV_FIELD_Y_MIN = 50      # 상단 엔드존 마진 (픽셀)
-BEV_FIELD_Y_MAX = 450     # 하단 엔드존 마진 (픽셀) - 벤치/사이드라인 제외
+BEV_FIELD_Y_MIN = 0       # 상단 엔드존 마진 (픽셀) - EXPANDED: 50 → 0
+BEV_FIELD_Y_MAX = 500     # 하단 엔드존 마진 (픽셀) - EXPANDED: 450 → 500
 
 # ============================================================================
 # DISTANCE TRACKING
@@ -151,10 +160,10 @@ ENABLE_DISTANCE_TRACKING = True  # 야드 측정
 # CLIP CONFIGURATION (OpenAI CLIP for semantic classification)
 # ============================================================================
 
-# Enable CLIP classification
-ENABLE_CLIP_CLASSIFICATION = True
-ENABLE_CLIP_ENTITY_FILTERING = True  # Filter out sideline personnel
-ENABLE_CLIP_TEAM_CLASSIFICATION = True  # Use CLIP for team classification
+# Enable CLIP classification (⭐ PHASE 2: ENABLED for Team B detection & accuracy)
+ENABLE_CLIP_CLASSIFICATION = True  # ENABLED: Team B HSV alone insufficient
+ENABLE_CLIP_ENTITY_FILTERING = True  # ENABLED: Filter sideline staff (reduce IDs)
+ENABLE_CLIP_TEAM_CLASSIFICATION = True  # ENABLED: Visual team classification (95%+ accuracy)
 
 # Import torch for device detection (must be before CLIP_DEVICE)
 try:
@@ -170,7 +179,7 @@ CLIP_MODEL_NAME = 'ViT-B/32'  # Options: ViT-B/32 (fast), ViT-B/16 (balanced), V
 # CLIP processing settings
 CLIP_BATCH_SIZE = 16         # Number of crops to process together (batch processing)
 CLIP_FRAME_INTERVAL = 30     # Run CLIP every N frames (30 = 1 detection per second at 30fps)
-CLIP_CONFIDENCE_THRESHOLD = 0.40  # Minimum confidence to use CLIP result (0.0-1.0)
+CLIP_CONFIDENCE_THRESHOLD = 0.50  # Minimum confidence (RAISED: 0.40→0.50 for stricter classification)
 
 # Entity classification prompts (개선: 더 구체적인 설명으로 정확도 향상)
 CLIP_ENTITY_PROMPTS = [
@@ -180,13 +189,17 @@ CLIP_ENTITY_PROMPTS = [
     "a photographer or cameraman with professional camera equipment near the field"
 ]
 
-# Team classification prompts (개선: 게임별로 커스터마이징 가능)
-# 더 구체적인 설명으로 팀 구별 정확도 향상
-# Team A = yellow top + white pants, Team B = white top + black pants
+# Team classification prompts - REFEREE EMPHASIS: Only 1-3 referees in entire game!
+# ⭐ CRITICAL: Players wear HELMETS and have NUMBERS, Referees have NO HELMET and NO NUMBERS!
+# Team A = WHITE helmet + YELLOW jersey with BLACK numbers + WHITE pants (PLAYER!)
+# Team B = BLACK helmet + WHITE jersey with SKY BLUE numbers + BLACK pants (PLAYER!)
+# Referee = NO helmet + STRIPED shirt (NO numbers!) + BLACK pants (ONLY 1-3 people!)
 CLIP_TEAM_PROMPTS = [
-    "an american football player wearing a yellow jersey top and white pants actively playing on the field",
-    "an american football player wearing a white jersey top and black pants during an active game",
-    "a football referee in black and white vertical striped shirt officiating the game"
+    "an american football player wearing a solid white colored protective helmet on their head with a bright yellow or gold colored jersey shirt with black colored numbers on the back and solid white colored football pants, actively running tackling and playing in the game",
+
+    "an american football player wearing a solid black colored protective helmet on their head with a plain solid white colored jersey shirt with sky blue or light blue colored numbers on the back without any stripes and solid black colored football pants, actively running tackling and playing in the game",
+
+    "a football referee official wearing NO helmet on their bare head with a black and white vertical striped referee shirt with thick alternating black and white vertical stripes without any numbers on the back and solid black pants, standing still and watching the game as an official referee without running or tackling like players do"
 ]
 
 # Entity filtering (what to exclude from result.mp4)

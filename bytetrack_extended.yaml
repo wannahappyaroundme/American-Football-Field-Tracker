@@ -1,10 +1,11 @@
 # Custom ByteTrack configuration for football play analysis
-# Extended buffer for long-term tracking without detection
-# Aggressive settings for stable tracking and reduced flickering
+# ⭐ PHASE 6: FINAL BALANCE - Multi-detection + moderate ID stability
+# Strategy: Sweet spot between coverage and stability
 
 tracker_type: bytetrack  # tracker type, ['botsort', 'bytetrack']
-track_high_thresh: 0.3  # threshold for the first association (낮춤: 더 많은 detection 허용)
-track_low_thresh: 0.05  # threshold for the second association (매우 낮음: 공 + 약한 detection 포함)
-new_track_thresh: 0.5  # threshold for init new track (높임: 새 track 생성 어렵게)
-track_buffer: 900  # buffer to calculate the time when to remove tracks (900 frames = 30 seconds at 30 FPS)
-match_thresh: 0.5  # threshold for matching tracks (낮춤: 더 관대한 매칭)
+track_high_thresh: 0.35  # threshold for the first association (standard)
+track_low_thresh: 0.20  # threshold for the second association (LOW: catch occluded players)
+new_track_thresh: 0.50  # threshold for init new track (MODERATE: balanced for 22 players)
+track_buffer: 90  # buffer (3 seconds @ 30fps, good for brief occlusions)
+match_thresh: 0.70  # threshold for matching tracks (LENIENT: 0.70 for better re-ID, lower IoU = easier matching)
+fuse_score: True  # fuse confidence scores with IOU scores during association (ultralytics 8.3+ requirement)

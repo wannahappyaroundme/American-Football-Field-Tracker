@@ -24,11 +24,11 @@
       "gainYard": 0,
       "tackler": "Unknown",
       "carrierInfo": {
-        "trackId": 2025,
+        "trackId": null,
         "jerseyNumber": "Unknown"
       },
       "passerInfo": {
-        "trackId": 2025,
+        "trackId": 63,
         "jerseyNumber": "Unknown"
       },
       "tacklerInfo": {

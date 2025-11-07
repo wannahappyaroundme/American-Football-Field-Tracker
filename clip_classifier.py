@@ -215,6 +215,9 @@ class CLIPTeamClassifier:
         self.team_confidence_history = {}  # track_id -> [(team, conf), ...]
         self.freeze_threshold = 1  # 1프레임 즉시 고정! (처음 1번 감지 후 변경 불가)
 
+        # ⭐ Referee tracking (only 1-3 referees in entire game!)
+        self.referee_candidates = {}  # track_id -> max_confidence
+
         print(f"CLIP Team Classifier initialized with {len(self.team_prompts)} team prompts")
         print(f"Team freeze mechanism: IMMEDIATE (1-frame freeze)")
 
@@ -323,11 +326,47 @@ class CLIPTeamClassifier:
                     self.player_teams[track_id] = team_label
                     print(f"🔒 Team FROZEN: Track #{track_id} → {team_label} (conf: {confidence:.2%})")
 
+                    # ⭐ Track referee candidates with their confidence
+                    if team_label == 'Referee':
+                        if track_id not in self.referee_candidates or confidence > self.referee_candidates.get(track_id, 0):
+                            self.referee_candidates[track_id] = confidence
+
         # 프리즈되지 않은 경우에만 임시 저장 (confidence threshold 체크)
         if confidence >= CLIP_CONFIDENCE_THRESHOLD:
             self.player_teams[track_id] = team_label
 
         return team_label, team_color, confidence
+
+    def get_top_referees(self, max_refs=3):
+        """
+        Get the top N referees by confidence (only 1-3 referees in a game!).
+
+        Args:
+            max_refs: Maximum number of referees to keep (default: 3)
+
+        Returns:
+            Set of track IDs that are confirmed referees
+        """
+        if not self.referee_candidates:
+            return set()
+
+        # Sort by confidence (highest first)
+        sorted_refs = sorted(self.referee_candidates.items(), key=lambda x: x[1], reverse=True)
+
+        # Take top N
+        top_refs = set([track_id for track_id, conf in sorted_refs[:max_refs]])
+
+        print(f"\n⚽ Referee Selection (Top {max_refs} from {len(self.referee_candidates)} candidates):")
+        for i, (track_id, conf) in enumerate(sorted_refs[:max_refs]):
+            print(f"  #{i+1} Track #{track_id}: {conf:.2%} confidence ✓ REFEREE")
+
+        # Print rejected referees (will be reclassified)
+        if len(sorted_refs) > max_refs:
+            print(f"\n  Rejected {len(sorted_refs) - max_refs} low-confidence referees (will be reclassified to Team A/B):")
+            for track_id, conf in sorted_refs[max_refs:]:
+                print(f"    Track #{track_id}: {conf:.2%} → Will reclassify")
+
+        return top_refs
 
     def is_frozen(self, track_id):
         """

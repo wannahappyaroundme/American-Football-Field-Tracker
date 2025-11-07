@@ -66,9 +66,12 @@ class PlayAnalyzer:
             foot_pos = view_transformer.get_foot_position(person_track['bbox'])
             bev_pos = view_transformer.transform_point(foot_pos)
 
-            # Filter out off-field players
-            if not view_transformer.is_on_field(bev_pos):
-                continue  # Skip this player - they're off the field
+            # ⭐ OFF-FIELD FILTERING DISABLED: Accept all 25-30 detections for CLIP
+            # Previous filtering removed too many players (BEV boundaries too strict)
+            # CLIP will distinguish on-field players vs sideline staff
+
+            # if not view_transformer.is_on_field(bev_pos):
+            #     continue  # Skip this player - they're off the field
 
             current_track_ids.add(track_id)
 

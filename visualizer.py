@@ -101,10 +101,10 @@ class Visualizer:
                     else:
                         team_color = UNKNOWN_COLOR  # 회색
 
-                # Determine color and label
+                # Determine color and label (볼 캐리어 = 주황색 우선!)
                 if track_id == ball_carrier_id:
-                    color = BALL_CARRIER_COLOR
-                    label_prefix = "Carrier"
+                    color = BALL_CARRIER_COLOR  # 주황색 (0, 165, 255) BGR
+                    label_prefix = "🏈 CARRIER"
                 elif entity_type == 'referee':
                     color = REFEREE_COLOR
                     label_prefix = "Referee"

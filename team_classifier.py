@@ -1,7 +1,16 @@
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
-from config import ENABLE_CLIP_TEAM_CLASSIFICATION
+from config import (
+    ENABLE_CLIP_TEAM_CLASSIFICATION,
+    TEAM_A_HSV_RANGE,
+    TEAM_B_HSV_RANGE,
+    REFEREE_HSV_RANGE,
+    TEAM_A_COLOR,
+    TEAM_B_COLOR,
+    REFEREE_COLOR,
+    UNKNOWN_COLOR
+)
 
 
 class TeamClassifier:
@@ -23,10 +32,21 @@ class TeamClassifier:
         self.clip_classifier = clip_team_classifier
         self.use_clip = ENABLE_CLIP_TEAM_CLASSIFICATION and clip_team_classifier is not None
 
+        # ⭐ NEW: Team freezing to prevent flickering (like tracker.py RobustTracker)
+        self.frozen_teams = {}  # Dict mapping track_id to frozen team (immutable once set)
+        self.team_confidence = {}  # Dict mapping track_id to number of consistent frames
+        self.freeze_threshold = 2  # Freeze team after 2 consistent frames
+
+        # ⭐ NEW: Pose-based team memory (선수 pose 기반 팀 정보 기억)
+        # track_id가 바뀌어도 유사한 pose의 선수는 같은 팀!
+        self.pose_memory = []  # List of (bbox, team_label) tuples
+        self.pose_similarity_threshold = 0.5  # Pose 유사도 임계값
+
         if self.use_clip:
             print("TeamClassifier initialized with CLIP-based classification")
         else:
             print("TeamClassifier initialized with color-based K-means clustering")
+        # print(f"Team freeze enabled: teams frozen after {self.freeze_threshold} consistent frames")  # CLIP 비활성화 시 불필요
 
     def extract_jersey_color(self, crop_image):
         """
@@ -245,6 +265,10 @@ class TeamClassifier:
         Returns:
             Team name string ('Team A', 'Team B', 'Referee', 'Others'), or 'Unknown'
         """
+        # ⭐ NEW: Check frozen teams first (highest priority - never changes!)
+        if track_id in self.frozen_teams:
+            return self.frozen_teams[track_id]
+
         # Check CLIP classifier first if available
         if self.use_clip and self.clip_classifier:
             clip_team = self.clip_classifier.get_team(track_id)
@@ -254,9 +278,22 @@ class TeamClassifier:
         # Fall back to color-based classification
         return self.player_teams.get(track_id, 'Unknown')
 
+    def is_frozen(self, track_id):
+        """
+        Check if a track_id has a frozen team assignment.
+
+        Args:
+            track_id: The track ID to check
+
+        Returns:
+            bool: True if team is frozen, False otherwise
+        """
+        return track_id in self.frozen_teams
+
     def assign_team_with_clip(self, track_id, crop_image):
         """
         Assign team using CLIP classifier (if enabled) or fall back to color-based.
+        ⭐ NEW: Implements team freezing logic to prevent flickering.
 
         Args:
             track_id: The track ID of the player
@@ -267,9 +304,32 @@ class TeamClassifier:
                 team_label: 'Team A', 'Team B', 'Referee', or 'Unknown'
                 confidence: float confidence score (0.0 if using color-based)
         """
+        # ⭐ NEW: If team is already frozen, return frozen team (never changes!)
+        if track_id in self.frozen_teams:
+            return self.frozen_teams[track_id], 1.0
+
         if self.use_clip and self.clip_classifier:
             # Use CLIP classification
             team_label, team_color, confidence = self.clip_classifier.assign_team(track_id, crop_image)
+
+            # ⭐ NEW: Team freezing logic (like tracker.py RobustTracker)
+            if team_label != 'Unknown':
+                # Check if same team as previous frame
+                previous_team = self.player_teams.get(track_id)
+
+                if previous_team == team_label:
+                    # Same team - increase confidence
+                    self.team_confidence[track_id] = self.team_confidence.get(track_id, 0) + 1
+
+                    # Freeze team if confidence threshold reached
+                    if self.team_confidence[track_id] >= self.freeze_threshold:
+                        self.frozen_teams[track_id] = team_label
+                        print(f"  🔒 Team frozen for ID {track_id}: {team_label} (confidence: {self.team_confidence[track_id]} frames)")
+                else:
+                    # Different team - reset confidence
+                    self.team_confidence[track_id] = 1
+                    self.player_teams[track_id] = team_label
+
             # Also store in local cache for backward compatibility
             self.player_teams[track_id] = team_label
             return team_label, confidence
@@ -277,3 +337,236 @@ class TeamClassifier:
             # Use color-based classification (collect samples for later clustering)
             self.collect_color_sample(track_id, crop_image)
             return 'Unknown', 0.0
+
+    def _calculate_pose_similarity(self, bbox1, bbox2):
+        """
+        선수 pose 유사도 계산 (위치 + 크기 + 종횡비)
+
+        Args:
+            bbox1, bbox2: [x1, y1, x2, y2]
+
+        Returns:
+            float: 유사도 (0-1, 높을수록 유사)
+        """
+        # 중심 거리 (정규화)
+        center1 = ((bbox1[0] + bbox1[2]) / 2, (bbox1[1] + bbox1[3]) / 2)
+        center2 = ((bbox2[0] + bbox2[2]) / 2, (bbox2[1] + bbox2[3]) / 2)
+        distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+        position_sim = max(0, 1 - distance / 300)  # 300 픽셀로 정규화
+
+        # 크기 유사도
+        size1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+        size2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+        size_ratio = min(size1, size2) / max(size1, size2) if max(size1, size2) > 0 else 0
+
+        # 종횡비 유사도
+        aspect1 = (bbox1[2] - bbox1[0]) / (bbox1[3] - bbox1[1]) if (bbox1[3] - bbox1[1]) > 0 else 0
+        aspect2 = (bbox2[2] - bbox2[0]) / (bbox2[3] - bbox2[1]) if (bbox2[3] - bbox2[1]) > 0 else 0
+        aspect_sim = 1 - min(abs(aspect1 - aspect2) / max(aspect1, aspect2), 1) if max(aspect1, aspect2) > 0 else 0
+
+        # 가중 평균 (위치 > 크기 > 종횡비)
+        similarity = 0.5 * position_sim + 0.3 * size_ratio + 0.2 * aspect_sim
+
+        return similarity
+
+    def classify_team_instantly(self, track_id, crop_image, bbox):
+        """
+        ⭐ tracker.py 방식: 즉시 팀 분류 (HSV 범위 기반)
+        ⭐ NEW: Pose 기반 팀 정보 재사용 (유사한 pose = 같은 선수 = 같은 팀)
+
+        매 프레임마다 실행해도 빠름! K-means 없이 HSV 범위만 체크.
+
+        Args:
+            track_id: The track ID of the player
+            crop_image: Cropped image of the player
+            bbox: Bounding box [x1, y1, x2, y2] for pose checking
+
+        Returns:
+            Tuple of (team_label, team_color_bgr)
+        """
+        # ⭐ NEW: 먼저 Pose 기반으로 기존 팀 정보 찾기 (깜빡임 방지!)
+        best_match_team = None
+        best_similarity = self.pose_similarity_threshold  # 0.5 이상만 매칭
+
+        for prev_bbox, prev_team in self.pose_memory:
+            similarity = self._calculate_pose_similarity(bbox, prev_bbox)
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match_team = prev_team
+
+        if best_match_team is not None:
+            # 유사한 pose 발견! 기존 팀 정보 재사용
+            self.player_teams[track_id] = best_match_team
+
+            # Pose 정보 업데이트 (최신 bbox로)
+            self.pose_memory = [(b, t) for b, t in self.pose_memory if t != best_match_team]
+            self.pose_memory.append((bbox, best_match_team))
+
+            # 팀 색상 반환
+            if best_match_team == 'Team A':
+                return best_match_team, TEAM_A_COLOR
+            elif best_match_team == 'Team B':
+                return best_match_team, TEAM_B_COLOR
+            elif best_match_team == 'Referee':
+                return best_match_team, REFEREE_COLOR
+            else:
+                return best_match_team, UNKNOWN_COLOR
+
+        # ⭐ PHASE 2: Try CLIP first if enabled, fallback to HSV
+        if self.use_clip and self.clip_classifier:
+            team_label, team_color, confidence = self.clip_classifier.assign_team(track_id, crop_image)
+
+            # ⭐ VERY STRICT: Referee needs MUCH higher confidence (only 1-3 in game!)
+            # Players need 50%, but Referee needs 75% to avoid false positives
+            min_confidence = 0.75 if team_label == 'Referee' else 0.5
+
+            if team_label != 'Unknown' and confidence > min_confidence:
+                # CLIP successful! Use its result
+                self.player_teams[track_id] = team_label
+                self.pose_memory.append((bbox, team_label))
+                return team_label, team_color
+
+        # ⭐ Fallback: HSV 기반으로 팀 분류
+        # 저지 색상 추출 (tracker.py의 get_team_color 로직)
+        hsv_color = self._extract_jersey_hsv(crop_image)
+
+        if hsv_color is None:
+            return 'Unknown', UNKNOWN_COLOR
+
+        # HSV 범위로 즉시 팀 분류 (줄무늬 감지 포함)
+        team_label, team_color = self._classify_by_hsv_range(hsv_color, crop_image)
+
+        # 팀 정보 저장 (캐시)
+        self.player_teams[track_id] = team_label
+
+        # Pose 정보 저장 (다음 프레임에서 재사용)
+        self.pose_memory.append((bbox, team_label))
+
+        # 메모리 관리: 너무 많이 쌓이면 오래된 것 제거 (최근 50개만 유지)
+        if len(self.pose_memory) > 50:
+            self.pose_memory = self.pose_memory[-50:]
+
+        return team_label, team_color
+
+    def _detect_stripes(self, region):
+        """
+        줄무늬 패턴 감지 (심판 유니폼용)
+
+        Args:
+            region: 분석할 이미지 영역 (numpy array)
+
+        Returns:
+            bool: 줄무늬 패턴이 감지되면 True
+        """
+        if region.size == 0:
+            return False
+
+        # 그레이스케일 변환
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+        # 픽셀 값의 표준편차 계산 (줄무늬는 명암 변화가 크므로 표준편차가 높음)
+        std_dev = np.std(gray)
+
+        # ⭐ STRICTER: 표준편차가 70 이상이면 줄무늬로 판단 (심판만 1-3명!)
+        # 일반 유니폼은 30-50, 약한 줄무늬 50-65, 명확한 줄무늬는 70 이상
+        return std_dev > 70
+
+    def _extract_jersey_hsv(self, crop_image):
+        """
+        tracker.py의 get_team_color() 함수 개선
+        저지 영역에서 HSV 색상 추출 (상의만 집중 분석)
+        """
+        if crop_image.size == 0:
+            return None
+
+        h, w = crop_image.shape[:2]
+
+        # ⭐ 상의 영역만 분석 (10%-40% 높이) - 하의 제외!
+        # Team B (흰색 상의)와 Referee (줄무늬) 구별을 위해
+        shirt_y1 = int(h * 0.10)
+        shirt_y2 = int(h * 0.40)
+        shirt_x1 = int(w * 0.2)
+        shirt_x2 = int(w * 0.8)
+
+        if shirt_y2 <= shirt_y1 or shirt_x2 <= shirt_x1:
+            return None
+
+        shirt_region = crop_image[shirt_y1:shirt_y2, shirt_x1:shirt_x2]
+
+        if shirt_region.size == 0:
+            return None
+
+        # HSV 변환
+        shirt_hsv = cv2.cvtColor(shirt_region, cv2.COLOR_BGR2HSV)
+        pixels = shirt_hsv.reshape(-1, 3).astype(np.float32)
+
+        # 그림자/반사광 필터링
+        brightness = pixels[:, 2]
+        saturation = pixels[:, 1]
+        mask = (brightness > 50) & (brightness < 210) & (saturation > 30)
+        filtered_pixels = pixels[mask]
+
+        if len(filtered_pixels) < 20:
+            return None
+
+        # K-means로 가장 채도 높은 색상 선택
+        n_clusters = min(2, len(filtered_pixels))
+        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+        kmeans.fit(filtered_pixels)
+
+        best_color = None
+        best_saturation = 0
+
+        for center in kmeans.cluster_centers_:
+            if center[1] > best_saturation:
+                best_saturation = center[1]
+                best_color = center
+
+        return best_color if best_color is not None else kmeans.cluster_centers_[0]
+
+    def _classify_by_hsv_range(self, hsv_color, crop_image):
+        """
+        tracker.py의 classify_team_fixed() 함수 개선
+        HSV 범위로 팀 분류 + 줄무늬 패턴 감지
+
+        Args:
+            hsv_color: HSV 색상 값
+            crop_image: 선수 크롭 이미지 (줄무늬 감지용)
+
+        Returns:
+            Tuple of (team_label, team_color_bgr)
+        """
+        h, s, v = hsv_color
+
+        # ⭐ 우선순위 1: 줄무늬 패턴 감지 (심판 전용!)
+        # 상의 영역 추출
+        if crop_image is not None and crop_image.size > 0:
+            h_crop, w_crop = crop_image.shape[:2]
+            shirt_y1 = int(h_crop * 0.10)
+            shirt_y2 = int(h_crop * 0.40)
+            shirt_x1 = int(w_crop * 0.2)
+            shirt_x2 = int(w_crop * 0.8)
+
+            if shirt_y2 > shirt_y1 and shirt_x2 > shirt_x1:
+                shirt_region = crop_image[shirt_y1:shirt_y2, shirt_x1:shirt_x2]
+                if self._detect_stripes(shirt_region):
+                    # 줄무늬 감지 → 심판!
+                    return "Referee", REFEREE_COLOR
+
+        # ⭐ 우선순위 2: Team A (노란색 - 채도 높음)
+        (h_min_a, s_min_a, v_min_a), (h_max_a, s_max_a, v_max_a) = TEAM_A_HSV_RANGE
+        if h_min_a <= h <= h_max_a and s_min_a <= s <= s_max_a and v_min_a <= v <= v_max_a:
+            return "Team A", TEAM_A_COLOR
+
+        # ⭐ 우선순위 3: Team B (흰색 - 매우 밝고 채도 낮음)
+        (h_min_b, s_min_b, v_min_b), (h_max_b, s_max_b, v_max_b) = TEAM_B_HSV_RANGE
+        if h_min_b <= h <= h_max_b and s_min_b <= s <= s_max_b and v_min_b <= v <= v_max_b:
+            return "Team B", TEAM_B_COLOR
+
+        # ⭐ 우선순위 4: Referee (HSV 범위 - 백업)
+        (h_min_r, s_min_r, v_min_r), (h_max_r, s_max_r, v_max_r) = REFEREE_HSV_RANGE
+        if h_min_r <= h <= h_max_r and s_min_r <= s <= s_max_r and v_min_r <= v <= v_max_r:
+            return "Referee", REFEREE_COLOR
+
+        return "Unknown", UNKNOWN_COLOR

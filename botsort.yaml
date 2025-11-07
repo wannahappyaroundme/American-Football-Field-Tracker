@@ -1,0 +1,29 @@
+# BoT-SORT configuration for football play analysis
+# BoT-SORT = ByteTrack + Camera Motion Compensation (GMC) + Re-ID (appearance matching)
+# Goal: Fix ID flickering issue (same player getting different IDs)
+
+tracker_type: botsort  # BoT-SORT tracker with GMC + Re-ID
+
+# Detection confidence thresholds (same strategy as ByteTrack)
+track_high_thresh: 0.40  # High confidence detections (first stage)
+track_low_thresh: 0.20   # Low confidence detections (second stage, catch occluded players)
+new_track_thresh: 0.60   # VERY high threshold for creating new tracks
+
+# Track management
+track_buffer: 90  # Keep lost tracks for 90 frames (3 seconds @ 30fps)
+match_thresh: 0.55  # IoU threshold for matching (balanced)
+
+# ⭐ Re-ID (Appearance Matching) - KEY FEATURE!
+# Uses OSNet to learn player appearance (uniform color, body shape, etc.)
+with_reid: true  # Enable Re-ID feature (critical for ID stability!)
+model: osnet_x0_25_msmt17.pt  # Lightweight Re-ID model (2.2M params, auto-download)
+proximity_thresh: 0.5  # Spatial distance threshold for Re-ID matching (pixels)
+appearance_thresh: 0.25  # Appearance similarity threshold (lower = more strict)
+
+# ⭐ Camera Motion Compensation (GMC) - KEY FEATURE!
+# Corrects for camera pan/tilt/zoom to improve tracking accuracy
+cmc_method: sparseOptFlow  # Options: orb, ecc, sparseOptFlow
+                           # sparseOptFlow is fastest (~5ms/frame)
+
+# Score fusion
+fuse_score: true  # Fuse detection confidence with IoU score
