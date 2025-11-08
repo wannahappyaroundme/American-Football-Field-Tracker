@@ -9,7 +9,20 @@ from config import (
     TEAM_A_COLOR,
     TEAM_B_COLOR,
     REFEREE_COLOR,
-    UNKNOWN_COLOR
+    UNKNOWN_COLOR,
+    BEV_FIELD_COLOR,
+    BEV_LINE_COLOR,
+    BEV_ENDZONE_COLOR,
+    BEV_SHOW_YARD_LINES,
+    BEV_SHOW_YARD_NUMBERS,
+    BEV_SHOW_HASH_MARKS,
+    BEV_MASK_OUT_OF_BOUNDS,
+    BEV_OUT_OF_BOUNDS_ALPHA,
+    BEV_FIELD_X_MIN,
+    BEV_FIELD_X_MAX,
+    BEV_FIELD_Y_MIN,
+    BEV_FIELD_Y_MAX,
+    PIXELS_PER_YARD_BEV
 )
 
 
@@ -23,6 +36,7 @@ class Visualizer:
         Initialize the Visualizer.
         """
         print("Visualizer initialized")
+        self.field_template_cache = None  # Cache for field template
 
     def draw_annotations(self, frame, tracks, ball_carrier_id, play_state, play_type, view_transformer=None, team_classifier=None):
         """
@@ -137,6 +151,92 @@ class Visualizer:
 
         return frame
 
+    def create_field_template(self, width=1000, height=500):
+        """
+        Create an American football field template with yard lines and markings.
+
+        Args:
+            width: Canvas width in pixels (default: 1000)
+            height: Canvas height in pixels (default: 500)
+
+        Returns:
+            Field template image (numpy array) with green field and white yard lines
+        """
+        # Use cached template if already created
+        if self.field_template_cache is not None:
+            cached_height, cached_width = self.field_template_cache.shape[:2]
+            if cached_width == width and cached_height == height:
+                return self.field_template_cache.copy()
+
+        # Create green field background
+        field = np.zeros((height, width, 3), dtype=np.uint8)
+        field[:, :] = BEV_FIELD_COLOR  # Forest green (BGR)
+
+        if BEV_SHOW_YARD_LINES:
+            # Calculate total field width in yards (based on PIXELS_PER_YARD_BEV)
+            field_width_yards = width / PIXELS_PER_YARD_BEV
+
+            # Draw vertical yard lines every 10 yards
+            # Standard American football field: 100 yards (+ 2 x 10 yard endzones = 120 total)
+            # For the main pipeline, we're showing a 50-yard section (1000px / 20px_per_yard = 50 yards)
+
+            for yard in range(0, int(field_width_yards) + 1, 10):
+                x = int(yard * PIXELS_PER_YARD_BEV)
+                if x > width:
+                    break
+
+                # Draw yard line
+                cv2.line(field, (x, 0), (x, height), BEV_LINE_COLOR, 2)
+
+                # Add yard numbers if enabled
+                if BEV_SHOW_YARD_NUMBERS and yard > 0 and yard < field_width_yards:
+                    # Display yard number at top and bottom
+                    yard_text = str(yard)
+                    cv2.putText(field, yard_text, (x - 15, 25),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, BEV_LINE_COLOR, 2)
+                    cv2.putText(field, yard_text, (x - 15, height - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, BEV_LINE_COLOR, 2)
+
+            # Draw horizontal sidelines (top and bottom)
+            cv2.line(field, (0, 0), (width, 0), BEV_LINE_COLOR, 3)
+            cv2.line(field, (0, height - 1), (width, height - 1), BEV_LINE_COLOR, 3)
+
+            # Draw vertical endzone lines (left and right)
+            cv2.line(field, (0, 0), (0, height), BEV_LINE_COLOR, 3)
+            cv2.line(field, (width - 1, 0), (width - 1, height), BEV_LINE_COLOR, 3)
+
+            # Optional: Draw hash marks
+            if BEV_SHOW_HASH_MARKS:
+                # Hash marks are placed at specific positions on the field
+                # Inner hash marks are 18.5 feet (6.17 yards) from sidelines
+                # Outer hash marks are at sidelines
+                hash_mark_offset = int(6.17 * PIXELS_PER_YARD_BEV)  # 18.5 feet
+                hash_mark_length = 15  # pixels
+
+                # Draw hash marks every 1 yard
+                for yard in range(0, int(field_width_yards) + 1):
+                    x = int(yard * PIXELS_PER_YARD_BEV)
+                    if x > width:
+                        break
+
+                    # Top hash marks
+                    if hash_mark_offset < height / 2:
+                        cv2.line(field, (x, hash_mark_offset - hash_mark_length // 2),
+                                (x, hash_mark_offset + hash_mark_length // 2),
+                                BEV_LINE_COLOR, 1)
+
+                    # Bottom hash marks
+                    bottom_offset = height - hash_mark_offset
+                    if bottom_offset > height / 2:
+                        cv2.line(field, (x, bottom_offset - hash_mark_length // 2),
+                                (x, bottom_offset + hash_mark_length // 2),
+                                BEV_LINE_COLOR, 1)
+
+        # Cache the template for reuse
+        self.field_template_cache = field.copy()
+
+        return field
+
     def draw_bird_eye_view(self, player_states, map_size=(1000, 500), team_classifier=None):
         """
         Draw a bird's eye view visualization of player positions and paths.
@@ -151,9 +251,9 @@ class Visualizer:
         Returns:
             The bird's eye view image (numpy array)
         """
-        # Create a blank canvas for the bird's eye view
+        # Create field template with yard lines instead of blank canvas
         width, height = map_size
-        bev_image = np.zeros((height, width, 3), dtype=np.uint8)
+        bev_image = self.create_field_template(width, height)
 
         # Draw each player's path
         for track_id, state in player_states.items():
@@ -201,6 +301,10 @@ class Visualizer:
                 cv2.putText(bev_image, label, (int(last_x) + 8, int(last_y)),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+        # Apply field boundary masking if enabled
+        if BEV_MASK_OUT_OF_BOUNDS:
+            bev_image = self._apply_field_mask(bev_image, width, height)
+
         return bev_image
 
     def _draw_dotted_line(self, image, pt1, pt2, color, thickness, gap=5):
@@ -236,3 +340,46 @@ class Visualizer:
             seg_pt2 = (int(x1 + t2 * (x2 - x1)), int(y1 + t2 * (y2 - y1)))
 
             cv2.line(image, seg_pt1, seg_pt2, color, thickness)
+
+    def _apply_field_mask(self, image, width, height):
+        """
+        Apply masking to darken areas outside the field boundaries.
+
+        Args:
+            image: The BEV image to apply masking to
+            width: Canvas width
+            height: Canvas height
+
+        Returns:
+            The masked image with out-of-bounds areas darkened
+        """
+        # Create a mask for the field boundaries
+        mask = np.zeros((height, width), dtype=np.uint8)
+
+        # Define field boundary polygon
+        field_polygon = np.array([
+            [BEV_FIELD_X_MIN, BEV_FIELD_Y_MIN],
+            [BEV_FIELD_X_MAX, BEV_FIELD_Y_MIN],
+            [BEV_FIELD_X_MAX, BEV_FIELD_Y_MAX],
+            [BEV_FIELD_X_MIN, BEV_FIELD_Y_MAX]
+        ], dtype=np.int32)
+
+        # Fill the field area with white (255 = keep original)
+        cv2.fillPoly(mask, [field_polygon], 255)
+
+        # Create a dark overlay for out-of-bounds areas
+        overlay = image.copy()
+        dark_color = (30, 30, 30)  # Dark gray
+        overlay[:, :] = dark_color
+
+        # Blend the original image with the dark overlay
+        # Areas inside field (mask=255) keep original
+        # Areas outside field (mask=0) become dark
+        mask_3channel = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) / 255.0
+        out_of_bounds_mask = 1.0 - mask_3channel
+
+        result = (image * mask_3channel +
+                 overlay * out_of_bounds_mask * (1.0 - BEV_OUT_OF_BOUNDS_ALPHA) +
+                 image * out_of_bounds_mask * BEV_OUT_OF_BOUNDS_ALPHA)
+
+        return result.astype(np.uint8)

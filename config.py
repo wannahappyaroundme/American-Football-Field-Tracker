@@ -329,6 +329,20 @@ BEV_FIELD_X_MAX = 950     # 오른쪽 사이드라인 마진 (픽셀)
 BEV_FIELD_Y_MIN = 0       # 상단 엔드존 마진 (픽셀) - EXPANDED: 50 → 0
 BEV_FIELD_Y_MAX = 500     # 하단 엔드존 마진 (픽셀) - EXPANDED: 450 → 500
 
+# BEV Field Visual Settings (미식축구 경기장 배경)
+# 【왜 필요한가?】
+# - 전술 맵을 TV 중계처럼 보기 좋게 표시
+# - 야드 라인으로 거리 직관적으로 파악
+# - 경기장 밖 영역을 어둡게 처리하여 시야 집중
+BEV_FIELD_COLOR = (34, 139, 34)         # 녹색 필드 (BGR: Forest Green)
+BEV_LINE_COLOR = (255, 255, 255)        # 흰색 야드 라인 (BGR: White)
+BEV_ENDZONE_COLOR = (20, 100, 20)       # 어두운 녹색 엔드존 (BGR)
+BEV_SHOW_YARD_LINES = True              # 야드 라인 표시 (10 yard마다)
+BEV_SHOW_YARD_NUMBERS = True            # 야드 번호 표시 (0, 10, 20, ...)
+BEV_SHOW_HASH_MARKS = False             # 해시 마크 표시 (선택사항)
+BEV_MASK_OUT_OF_BOUNDS = True           # 경기장 밖 영역 어둡게 처리
+BEV_OUT_OF_BOUNDS_ALPHA = 0.3           # 경기장 밖 투명도 (0.3 = 70% 어둡게)
+
 
 # ============================================================================
 # 📏 DISTANCE TRACKING (거리 측정)
