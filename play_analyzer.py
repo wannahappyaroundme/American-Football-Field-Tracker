@@ -58,9 +58,10 @@ class PlayAnalyzer:
                 person_tracks.append(track)
 
         # Update player positions in player_states
+        # ⭐ NOW USES stable_id instead of track_id for jersey-based tracking
         current_track_ids = set()
         for person_track in person_tracks:
-            track_id = person_track['track_id']
+            track_id = person_track.get('stable_id', person_track.get('track_id'))  # Use stable_id
 
             # Get foot position and transform to BEV
             foot_pos = view_transformer.get_foot_position(person_track['bbox'])
@@ -110,7 +111,7 @@ class PlayAnalyzer:
             closest_person_id = None
 
             for person_track in person_tracks:
-                person_id = person_track['track_id']
+                person_id = person_track.get('stable_id', person_track.get('track_id'))  # Use stable_id
                 person_foot_pos = view_transformer.get_foot_position(person_track['bbox'])
                 person_bev_pos = view_transformer.transform_point(person_foot_pos)
 
@@ -188,7 +189,8 @@ class PlayAnalyzer:
                     # Find ball carrier's BEV position for end position
                     ball_carrier_track = None
                     for track in tracks:
-                        if track['track_id'] == self.ball_carrier_id:
+                        track_stable_id = track.get('stable_id', track.get('track_id'))
+                        if track_stable_id == self.ball_carrier_id:
                             ball_carrier_track = track
                             break
 
@@ -201,7 +203,8 @@ class PlayAnalyzer:
                     closest_tackler_id = None
 
                     for track in tracks:
-                        if track['class_id'] == CLASS_ID_PERSON and track['track_id'] != self.ball_carrier_id:
+                        track_stable_id = track.get('stable_id', track.get('track_id'))
+                        if track['class_id'] == CLASS_ID_PERSON and track_stable_id != self.ball_carrier_id:
                             person_foot_pos = view_transformer.get_foot_position(track['bbox'])
                             person_bev_pos = view_transformer.transform_point(person_foot_pos)
 
@@ -209,7 +212,7 @@ class PlayAnalyzer:
                                 dist = distance.euclidean(self.end_ball_bev, person_bev_pos)
                                 if dist < min_distance:
                                     min_distance = dist
-                                    closest_tackler_id = track['track_id']
+                                    closest_tackler_id = track_stable_id
 
                     self.tackler_id = closest_tackler_id
 

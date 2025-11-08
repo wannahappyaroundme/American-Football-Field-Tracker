@@ -30,8 +30,8 @@ class Visualizer:
 
         Args:
             frame: The video frame to draw on (numpy array)
-            tracks: List of track dictionaries with 'bbox', 'track_id', 'class_id'
-            ball_carrier_id: The track_id of the player carrying the ball (or None)
+            tracks: List of track dictionaries with 'bbox', 'stable_id', 'class_id'
+            ball_carrier_id: The stable_id of the player carrying the ball (or None)
             play_state: String representing the current play state
             play_type: String representing the current play type
             view_transformer: ViewTransformer instance for filtering off-field players (optional)
@@ -60,7 +60,7 @@ class Visualizer:
         # Draw bounding boxes for all tracks
         for track in tracks:
             bbox = track['bbox']
-            track_id = track['track_id']
+            track_id = track.get('stable_id', track.get('track_id'))  # Use stable_id if available
             class_id = track['class_id']
 
             # Filter out off-field players if transformer is provided

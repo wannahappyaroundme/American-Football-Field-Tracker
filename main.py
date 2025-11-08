@@ -155,8 +155,9 @@ def main():
         active_ball_tracks = 0
 
         # ⭐ tracker.py 방식: 매 프레임마다 즉시 팀 할당!
+        # ⭐ NOW USES stable_id for jersey-based tracking
         for track in tracks:
-            track_id = track['track_id']
+            track_id = track.get('stable_id', track.get('track_id'))  # Use stable_id
             seen_track_ids.add(track_id)
 
             if track['class_id'] == CLASS_ID_PERSON:

@@ -14,6 +14,7 @@ from config import (
     BALL_ASPECT_RATIO_MAX,
     DETECTION_EVERY_N_FRAMES
 )
+from jersey_id_manager import JerseyBasedIDManager
 
 
 class DetectorTracker:
@@ -26,21 +27,31 @@ class DetectorTracker:
     - NO duplicate filtering (ByteTrack handles everything)
     """
 
-    def __init__(self, view_transformer=None):
+    def __init__(self, view_transformer=None, number_recognizer=None, team_classifier=None):
         """
         Initialize the DetectorTracker by loading the YOLO detection model.
 
         Args:
             view_transformer: ViewTransformer instance for BEV masking (optional)
+            number_recognizer: NumberRecognizer instance for jersey OCR (optional)
+            team_classifier: TeamClassifier instance for team assignment (optional)
         """
         self.model = YOLO(DETECTION_MODEL_PATH)
         self.frame_count = 0
         self.view_transformer = view_transformer
+        self.number_recognizer = number_recognizer
+        self.team_classifier = team_classifier
 
         # ⭐ 3-frame history for ID continuity
         self.track_history = deque(maxlen=3)  # Store last 3 frames of tracks
         self.id_mapping = {}  # Maps new detections to consistent IDs
         self.next_stable_id = 1  # Counter for stable IDs
+
+        # ⭐ Jersey-based ID manager for stable tracking
+        self.jersey_manager = JerseyBasedIDManager()
+
+        # OCR interval (every N frames to avoid overhead)
+        self.ocr_interval = 30  # Run OCR every 30 frames (1 second @ 30fps)
 
         print(f"Loaded YOLO model from {DETECTION_MODEL_PATH}")
         print(f"⭐ PHASE 3 OPTIMIZATIONS APPLIED:")
@@ -152,13 +163,15 @@ class DetectorTracker:
     def _maintain_id_continuity(self, current_tracks):
         """
         ⭐ 3-frame ID continuity: Match new detections with historical tracks.
-        If a detection matches a track from the last 3 frames, reuse that ID.
+        If a detection matches a track from the last 3 frames, reuse that stable ID.
+
+        NOW USES: stable_id (jersey-based) instead of track_id (ByteTrack)
 
         Args:
-            current_tracks: List of track dictionaries from ByteTrack
+            current_tracks: List of track dictionaries with stable_id field
 
         Returns:
-            List of tracks with stable IDs
+            List of tracks with stable IDs maintained across frames
         """
         if len(self.track_history) == 0:
             # First frame, accept all IDs as-is
@@ -166,12 +179,13 @@ class DetectorTracker:
             return current_tracks
 
         # Build a map of historical tracks (last 3 frames)
+        # Use stable_id instead of track_id for jersey-based tracking
         historical_tracks = {}
         for frame_tracks in self.track_history:
             for track in frame_tracks:
-                track_id = track['track_id']
-                if track_id not in historical_tracks:
-                    historical_tracks[track_id] = track
+                stable_id = track.get('stable_id', track['track_id'])
+                if stable_id not in historical_tracks:
+                    historical_tracks[stable_id] = track
 
         # Match current tracks with historical tracks
         stable_tracks = []
@@ -196,12 +210,12 @@ class DetectorTracker:
                     best_similarity = similarity
                     best_match_id = hist_id
 
-            # Assign stable ID
+            # Maintain stable ID continuity
             if best_match_id is not None:
-                # Reuse historical ID
-                track['track_id'] = best_match_id
+                # Reuse historical stable ID
+                track['stable_id'] = best_match_id
                 matched_historical_ids.add(best_match_id)
-            # else: keep ByteTrack's assigned ID (new detection)
+            # else: keep jersey_manager's assigned stable_id (new detection)
 
             stable_tracks.append(track)
 
@@ -328,7 +342,53 @@ class DetectorTracker:
                 'confidence': confidence
             })
 
-        # ⭐ PHASE 3: RE-ENABLED 3-frame ID continuity for additional stability
-        # ByteTrack handles basic matching, this adds pose-based re-identification
+        # ⭐ PHASE 7: JERSEY-BASED ID MAPPING (근본 해결!)
+        # Strategy: Use jersey numbers to assign stable IDs
+        # Goal: 73 IDs → 30-40 IDs (matching 22 players + substitutions)
+
+        # Run jersey OCR every N frames (avoid overhead)
+        if self.number_recognizer is not None and self.frame_count % self.ocr_interval == 0:
+            for track in tracks:
+                if track['class_id'] == CLASS_ID_PERSON:
+                    # Extract player crop
+                    x1, y1, x2, y2 = track['bbox']
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    crop = frame[y1:y2, x1:x2]
+
+                    if crop.size > 0:
+                        # Recognize jersey number
+                        jersey_num = self.number_recognizer.recognize_number(crop)
+                        track['jersey_num'] = jersey_num
+
+                        # Get team assignment
+                        if self.team_classifier is not None:
+                            team = self.team_classifier.player_teams.get(track['track_id'], 'Unknown')
+                            track['team'] = team
+                        else:
+                            track['team'] = 'Unknown'
+                    else:
+                        track['jersey_num'] = None
+                        track['team'] = 'Unknown'
+
+        # Apply stable ID mapping based on jersey numbers
+        if self.jersey_manager is not None:
+            # Get stable IDs
+            for track in tracks:
+                if track['class_id'] == CLASS_ID_PERSON:
+                    jersey_num = track.get('jersey_num')
+                    team = track.get('team', 'Unknown')
+
+                    stable_id = self.jersey_manager.get_stable_id(
+                        track['track_id'], jersey_num, team, self.frame_count
+                    )
+                    track['stable_id'] = stable_id
+                else:
+                    # Ball keeps original track_id
+                    track['stable_id'] = track['track_id']
+
+            # Resolve conflicts (same jersey detected multiple times)
+            tracks = self.jersey_manager.resolve_conflicts(tracks, self.frame_count)
+
+        # ⭐ PHASE 3: 3-frame ID continuity (now uses stable IDs)
         stable_tracks = self._maintain_id_continuity(tracks)
         return stable_tracks
