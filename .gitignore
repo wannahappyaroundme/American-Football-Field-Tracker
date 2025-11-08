@@ -44,10 +44,13 @@ env/
 # *.jpeg
 # *.png
 
-# Output files
+# Output files (large video files - GitHub 100MB limit)
+output/
 output*.mp4
 *_output.*
 *_processed.*
+*.mp4
+*.avi
 
 # Temporary files
 *.tmp
