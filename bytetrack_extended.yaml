@@ -1,11 +1,186 @@
-# Custom ByteTrack configuration for football play analysis
-# ⭐ PHASE 6: FINAL BALANCE - Multi-detection + moderate ID stability
-# Strategy: Sweet spot between coverage and stability
+# ==============================================================================
+# ByteTrack Configuration - 미식축구 경기 분석 최적화 설정
+# ==============================================================================
+#
+# 【ByteTrack이란?】
+# - SOTA Multi-Object Tracker (ECCV 2022)
+# - 2-stage association: high confidence + low confidence detections
+# - Kalman filter로 가려진 객체 예측 추적
+# - 실시간 성능 + 높은 정확도
+#
+# 【왜 ByteTrack인가?】
+# 1. BoT-SORT 시도: Re-ID 기능 우수하지만 Ultralytics config 오류
+# 2. DeepSORT: 느리고 ID switching 문제
+# 3. ByteTrack: 빠르고 안정적, Ultralytics 네이티브 지원
+#
+# 【최적화 과정】
+# - Phase 1: Default → 133 IDs (6.0x over 22 players)
+# - Phase 2: Strict (new_track=0.60) → 75 IDs (3.4x) but lost multi-detection
+# - Phase 3: Lenient (match=0.50) → 330 IDs (15x) explosion!
+# - Phase 4: Balanced (new_track=0.50, match=0.70) → 73 IDs (3.3x) ✓ CURRENT
+#
+# 【현재 성능】
+# - 총 IDs: 73 (22명 선수 → 3.3배)
+# - 탐지율: 16-23명/프레임 (multi-detection 유지)
+# - 심판: 3-4명 (목표 1-4명 달성)
+#
+# ==============================================================================
 
 tracker_type: bytetrack  # tracker type, ['botsort', 'bytetrack']
+
+# ==============================================================================
+# DETECTION CONFIDENCE THRESHOLDS (탐지 신뢰도 임계값)
+# ==============================================================================
+#
+# 【2-Stage Association】
+# ByteTrack의 핵심 아이디어는 high confidence와 low confidence를 분리 처리:
+#
+# Stage 1: High confidence detections (track_high_thresh 이상)
+#   - 확실한 탐지만 사용
+#   - 기존 tracks와 IoU matching
+#   - 매우 안정적
+#
+# Stage 2: Low confidence detections (track_low_thresh ~ track_high_thresh)
+#   - 가려진 객체, 멀리 있는 객체 포함
+#   - Stage 1에서 매칭 안 된 tracks와 2차 매칭
+#   - Multi-detection 향상에 핵심!
+#
+# 【값 설명】
+# - track_high_thresh=0.35: YOLO confidence 0.35 이상 = 확실한 탐지
+# - track_low_thresh=0.20: YOLO confidence 0.20-0.35 = 불확실하지만 유효
+#   → 가려진 선수, 멀리 있는 선수 놓치지 않음
+#
 track_high_thresh: 0.35  # threshold for the first association (standard)
-track_low_thresh: 0.20  # threshold for the second association (LOW: catch occluded players)
+track_low_thresh: 0.20   # threshold for the second association (LOW: catch occluded players)
+
+# ==============================================================================
+# NEW TRACK CREATION (새 트랙 생성 임계값)
+# ==============================================================================
+#
+# 【new_track_thresh란?】
+# - 새로운 객체로 인식하여 track ID 부여할 최소 신뢰도
+# - 높을수록: ID 수 감소, 하지만 새 선수 놓칠 수 있음
+# - 낮을수록: 모든 탐지를 track으로 만듦, ID 폭발
+#
+# 【최적화 과정】
+# - 0.40 (default): 133 IDs - 너무 많음
+# - 0.60 (strict): 75 IDs - 좋지만 multi-detection 1-5명으로 폭락
+# - 0.45 (moderate): 330 IDs - 폭발! match_thresh가 너무 낮았음
+# - 0.50 (balanced): 73 IDs + 16-23명 탐지 ✓ CURRENT
+#
+# 【왜 0.50인가?】
+# - 22명 선수 + 3명 심판 + 교체/부상 = 약 30명
+# - 너무 낮으면 사이드라인 인원까지 track 생성
+# - 너무 높으면 실제 선수 놓침
+# - 0.50 = 균형점 (CLIP이 사이드라인 필터링)
+#
 new_track_thresh: 0.50  # threshold for init new track (MODERATE: balanced for 22 players)
+
+# ==============================================================================
+# TRACK BUFFER (트랙 유지 시간)
+# ==============================================================================
+#
+# 【track_buffer란?】
+# - 탐지 실패 시 Kalman filter로 몇 프레임 동안 track을 유지할지
+# - 단위: 프레임 (30fps 기준)
+#
+# 【왜 90프레임인가?】
+# - 90프레임 = 3초 (at 30fps)
+# - 미식축구: 선수들이 뭉쳐서 가림 현상 빈번
+# - 3초면 충분히 다시 나타남
+# - 너무 길면 (300): 경기장 떠난 선수도 계속 추적
+# - 너무 짧으면 (30): 잠깐 가려져도 ID 바뀜
+#
 track_buffer: 90  # buffer (3 seconds @ 30fps, good for brief occlusions)
-match_thresh: 0.70  # threshold for matching tracks (LENIENT: 0.70 for better re-ID, lower IoU = easier matching)
+
+# ==============================================================================
+# MATCH THRESHOLD (매칭 임계값)
+# ==============================================================================
+#
+# 【match_thresh란?】
+# - IoU (Intersection over Union) 기반 매칭 임계값
+# - 새 detection과 기존 track의 bounding box IoU 계산
+# - IoU >= match_thresh → 같은 객체로 판단
+#
+# 【IoU 이해하기】
+# - IoU = (교집합 면적) / (합집합 면적)
+# - 1.0 = 완전히 겹침
+# - 0.5 = 절반 겹침
+# - 0.0 = 전혀 안 겹침
+#
+# 【왜 0.70인가?】
+# - 높을수록 (0.90): 매칭 조건 까다로움 → ID 바뀜 잦음
+# - 낮을수록 (0.50): 매칭 조건 관대함 → 다른 선수 혼동
+# - **역설적으로 높은 값 = 더 관대함!**
+#   → IoU 0.7이면 70% 겹치면 매칭 (쉽게 매칭됨)
+#   → IoU 0.9이면 90% 겹쳐야 매칭 (어렵게 매칭됨)
+#
+# 【최적화 과정】
+# - 0.60 (default): 133 IDs - ID switching 많음
+# - 0.50 (strict): 330 IDs - 역효과! 너무 까다로워서 새 ID 생성
+# - 0.70 (lenient): 73 IDs - 성공! ✓ CURRENT
+#
+# ⚠️ 주의: match_thresh는 "높을수록 관대함" (직관과 반대!)
+#
+match_thresh: 0.70  # threshold for matching tracks (LENIENT: 0.70 for better re-ID)
+
+# ==============================================================================
+# SCORE FUSION (신뢰도 융합)
+# ==============================================================================
+#
+# 【fuse_score란?】
+# - Detection confidence와 IoU를 결합하여 매칭 점수 계산
+# - True: 신뢰도 높고 + IoU 높음 = 우선 매칭
+# - False: IoU만 사용
+#
+# 【왜 True인가?】
+# - Ultralytics 8.3+ 버전 요구사항
+# - 더 robust한 매칭 (신뢰도도 고려)
+#
 fuse_score: True  # fuse confidence scores with IOU scores during association (ultralytics 8.3+ requirement)
+
+# ==============================================================================
+# PHASE별 설정 변화 (디버그/참고용)
+# ==============================================================================
+#
+# Phase 1: Default (실패 - ID 폭발)
+#   track_high_thresh: 0.40
+#   track_low_thresh: 0.20
+#   new_track_thresh: 0.40
+#   track_buffer: 30
+#   match_thresh: 0.60
+#   → 결과: 133 IDs (6.0x)
+#
+# Phase 2: Strict (실패 - multi-detection 손실)
+#   track_high_thresh: 0.40
+#   track_low_thresh: 0.20
+#   new_track_thresh: 0.60  # ⬆️ STRICT
+#   track_buffer: 90
+#   match_thresh: 0.60
+#   → 결과: 75 IDs (3.4x), but only 1-5 players detected
+#
+# Phase 3: Lenient match (실패 - ID 폭발)
+#   track_high_thresh: 0.35
+#   track_low_thresh: 0.20
+#   new_track_thresh: 0.45
+#   track_buffer: 90
+#   match_thresh: 0.50  # ⬇️ TOO STRICT (역설적!)
+#   → 결과: 330 IDs (15x) explosion!
+#
+# Phase 4: Balanced (성공 ✓)
+#   track_high_thresh: 0.35
+#   track_low_thresh: 0.20
+#   new_track_thresh: 0.50  # ⬆️ MODERATE
+#   track_buffer: 90
+#   match_thresh: 0.70  # ⬆️ LENIENT
+#   → 결과: 73 IDs (3.3x), 16-23 players detected ✓ CURRENT
+#
+# ==============================================================================
+#
+# 【다음 개선 방향】
+# 1. Jersey OCR 개선: 정면 카메라 또는 OCR 전처리 강화
+# 2. BoT-SORT 재도전: Ultralytics 버전 업그레이드 후 Re-ID 기능 활용
+# 3. Custom Re-ID: OSNet 모델로 appearance-based matching 추가
+# 4. Fine-tuned YOLO: 미식축구 데이터셋으로 재학습 (detection 개선)
+#
+# ==============================================================================

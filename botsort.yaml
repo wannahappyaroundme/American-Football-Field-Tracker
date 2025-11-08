@@ -1,29 +1,145 @@
-# BoT-SORT configuration for football play analysis
-# BoT-SORT = ByteTrack + Camera Motion Compensation (GMC) + Re-ID (appearance matching)
-# Goal: Fix ID flickering issue (same player getting different IDs)
+# ==============================================================================
+# BoT-SORT Configuration - 참고용 (현재 미사용)
+# ==============================================================================
+#
+# ⚠️ 주의: 이 설정은 Ultralytics config 오류로 인해 현재 사용되지 않습니다!
+# 대신 ByteTrack + Jersey OCR 조합을 사용 중입니다.
+#
+# 【BoT-SORT란?】
+# - ByteTrack + Camera Motion Compensation (GMC) + Re-ID
+# - SOTA tracker with appearance-based matching
+# - Paper: "BoT-SORT: Robust Associations Multi-Pedestrian Tracking" (2022)
+#
+# 【왜 BoT-SORT를 시도했나?】
+# 1. Re-ID 기능: OSNet 모델로 선수 외형 학습
+#    - 유니폼 색상, 체형, 포즈 등 종합 판단
+#    - Jersey OCR 없이도 ID 안정성 확보 가능
+# 2. GMC (Camera Motion Compensation):
+#    - 카메라 팬/틸트/줌을 보정
+#    - 고정 카메라 아닌 경우 필수
+# 3. ByteTrack 기반: ByteTrack의 모든 장점 + Re-ID
+#
+# 【실패 원인】
+# - Ultralytics 버전 호환 문제
+# - Error: "AttributeError: 'IterableSimpleNamespace' object has no attribute 'model'"
+# - model: osnet_x0_25_msmt17.pt 파라미터가 제대로 파싱 안 됨
+# - Ultralytics 업데이트 후 재시도 필요
+#
+# 【대안 솔루션】
+# - Current: ByteTrack + Jersey OCR (73 IDs, 3.3x)
+# - Future: BoT-SORT 수정 or Custom Re-ID 구현
+#
+# ==============================================================================
 
 tracker_type: botsort  # BoT-SORT tracker with GMC + Re-ID
 
-# Detection confidence thresholds (same strategy as ByteTrack)
+# ==============================================================================
+# DETECTION CONFIDENCE THRESHOLDS (ByteTrack과 동일)
+# ==============================================================================
+
 track_high_thresh: 0.40  # High confidence detections (first stage)
 track_low_thresh: 0.20   # Low confidence detections (second stage, catch occluded players)
 new_track_thresh: 0.60   # VERY high threshold for creating new tracks
 
-# Track management
+# ==============================================================================
+# TRACK MANAGEMENT
+# ==============================================================================
+
 track_buffer: 90  # Keep lost tracks for 90 frames (3 seconds @ 30fps)
 match_thresh: 0.55  # IoU threshold for matching (balanced)
 
+# ==============================================================================
 # ⭐ Re-ID (Appearance Matching) - KEY FEATURE!
-# Uses OSNet to learn player appearance (uniform color, body shape, etc.)
+# ==============================================================================
+#
+# 【Re-ID란?】
+# - Re-Identification: 선수의 외형(appearance)을 학습하여 매칭
+# - OSNet 모델: 경량 딥러닝 모델 (2.2M params)
+# - 유니폼 색상, 체형, 번호 패턴 등을 벡터로 임베딩
+#
+# 【동작 원리】
+# 1. 각 track의 crop 이미지를 OSNet에 입력
+# 2. 256-dim feature vector 추출
+# 3. 새 detection과 기존 track의 feature 유사도 계산
+# 4. appearance_thresh 이상이면 같은 선수로 판단
+#
+# 【장점】
+# - Jersey OCR 없이도 ID 안정성 확보
+# - 조명 변화, 가림 현상에 robust
+# - 정면/측면/후면 모두 처리 가능
+#
+# 【단점】
+# - 느림 (OSNet inference overhead)
+# - GPU 권장 (CPU는 매우 느림)
+# - 유니폼이 비슷하면 혼동 가능
+#
+# 【OSNet 모델】
+# - osnet_x0_25_msmt17.pt: 경량 모델 (2.2M params)
+# - osnet_x1_0_msmt17.pt: 표준 모델 (8.9M params, 더 정확)
+# - MSMT17 데이터셋으로 학습 (보행자 Re-ID)
+# - Ultralytics가 자동 다운로드
+#
 with_reid: true  # Enable Re-ID feature (critical for ID stability!)
 model: osnet_x0_25_msmt17.pt  # Lightweight Re-ID model (2.2M params, auto-download)
 proximity_thresh: 0.5  # Spatial distance threshold for Re-ID matching (pixels)
 appearance_thresh: 0.25  # Appearance similarity threshold (lower = more strict)
 
+# ==============================================================================
 # ⭐ Camera Motion Compensation (GMC) - KEY FEATURE!
-# Corrects for camera pan/tilt/zoom to improve tracking accuracy
+# ==============================================================================
+#
+# 【GMC란?】
+# - Global Motion Compensation: 카메라 움직임 보정
+# - 카메라가 팬/틸트/줌하면 모든 객체가 이동한 것처럼 보임
+# - GMC가 이를 보정하여 실제 객체 이동만 추적
+#
+# 【방법】
+# - orb: ORB feature matching (빠름, 정확도 중간)
+# - ecc: Enhanced Correlation Coefficient (느림, 정확)
+# - sparseOptFlow: Sparse Optical Flow (가장 빠름, ~5ms/frame)
+#
+# 【언제 필요한가?】
+# - 카메라가 움직이는 경우 (필수)
+# - 고정 카메라는 불필요 (overhead만)
+# - 현재 프로젝트: 고정 카메라라 불필요
+#
+# 【성능】
+# - sparseOptFlow: ~5ms/frame (권장)
+# - orb: ~10ms/frame
+# - ecc: ~50ms/frame (매우 느림)
+#
 cmc_method: sparseOptFlow  # Options: orb, ecc, sparseOptFlow
                            # sparseOptFlow is fastest (~5ms/frame)
 
-# Score fusion
+# ==============================================================================
+# SCORE FUSION
+# ==============================================================================
+
 fuse_score: true  # Fuse detection confidence with IoU score
+
+# ==============================================================================
+# BoT-SORT vs ByteTrack 성능 비교 (예상)
+# ==============================================================================
+#
+# ByteTrack (현재 사용):
+#   - IDs: 73 (3.3x)
+#   - Speed: ~40ms/frame
+#   - 장점: 빠름, 안정적
+#   - 단점: Re-ID 없음, 가림 후 ID 바뀜
+#
+# BoT-SORT (수정 후 예상):
+#   - IDs: 40-50 (1.8-2.3x) - Re-ID 덕분에 개선
+#   - Speed: ~60ms/frame (OSNet overhead)
+#   - 장점: 외형 기반 매칭, ID 안정성 최고
+#   - 단점: 느림, GPU 권장
+#
+# ==============================================================================
+#
+# 【다음 단계】
+# 1. Ultralytics 버전 업데이트 (8.3+ → 최신)
+# 2. BoT-SORT config 파싱 오류 해결
+# 3. OSNet 모델 다운로드 확인
+# 4. GPU 환경에서 테스트 (CPU는 너무 느림)
+# 5. Re-ID + Jersey OCR 조합 시도
+#
+# ==============================================================================
