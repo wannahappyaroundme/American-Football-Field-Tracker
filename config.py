@@ -29,6 +29,62 @@ Video → YOLO Detection → ByteTrack → Jersey OCR → CLIP Team Classificati
 """
 
 # ============================================================================
+# 🧍 POSE DETECTION (포즈 인식 - 자세 낮춘 선수 감지)
+# ============================================================================
+#
+# 【왜 필요한가?】
+# - 스크리미지 라인에서 자세를 낮춘 선수들 (3-point stance, 4-point stance)
+# - 무릎을 구부리거나 앉은 자세의 선수들
+# - 일반 person detection만으로는 상반신만 감지되어 놓칠 수 있음
+#
+# 【동작 원리】
+# 1. YOLO Pose로 keypoint 감지 (어깨, 무릎, 발목 등 17개 포인트)
+# 2. 자세 분석: shoulder-hip-knee 각도로 stance 판단
+# 3. Bounding box 확장: 하체가 잘리는 경우 bbox 아래로 확장
+# 4. PRE_SNAP 검증: 모든 선수가 set 자세인지 확인
+#
+# ============================================================================
+
+ENABLE_POSE_DETECTION = True              # 포즈 기반 감지 활성화
+POSE_CONFIDENCE_THRESHOLD = 0.4           # 포즈 감지 신뢰도 (0.4 = 중간)
+POSE_FRAME_INTERVAL = 5                   # 5프레임마다 포즈 감지 (성능 최적화)
+
+# Stance detection (자세 감지)
+ENABLE_STANCE_DETECTION = True            # 자세 감지 활성화 (PRE_SNAP 검증용)
+CROUCHED_KNEE_ANGLE_MAX = 140             # 무릎 각도 140도 이하 = 자세 낮춤
+STANDING_KNEE_ANGLE_MIN = 160             # 무릎 각도 160도 이상 = 서있음
+THREE_POINT_STANCE_HAND_THRESHOLD = 0.3   # 손이 지면에 0.3m 이내 = 3-point stance
+
+# Bounding box expansion (bbox 확장)
+EXPAND_BBOX_FOR_CROUCHED = True           # 자세 낮춘 선수 bbox 확장
+BBOX_EXPANSION_RATIO = 0.3                # 아래로 30% 확장 (무릎/발 포함)
+
+# COCO keypoint indices (YOLO Pose 17 keypoints)
+# 【COCO Pose Keypoints】
+# 0: nose, 1: left_eye, 2: right_eye, 3: left_ear, 4: right_ear
+# 5: left_shoulder, 6: right_shoulder
+# 7: left_elbow, 8: right_elbow
+# 9: left_wrist, 10: right_wrist
+# 11: left_hip, 12: right_hip
+# 13: left_knee, 14: right_knee
+# 15: left_ankle, 16: right_ankle
+KEYPOINT_NOSE = 0
+KEYPOINT_LEFT_SHOULDER = 5
+KEYPOINT_RIGHT_SHOULDER = 6
+KEYPOINT_LEFT_HIP = 11
+KEYPOINT_RIGHT_HIP = 12
+KEYPOINT_LEFT_KNEE = 13
+KEYPOINT_RIGHT_KNEE = 14
+KEYPOINT_LEFT_ANKLE = 15
+KEYPOINT_RIGHT_ANKLE = 16
+KEYPOINT_LEFT_WRIST = 9
+KEYPOINT_RIGHT_WRIST = 10
+
+# Keypoint confidence threshold
+KEYPOINT_CONFIDENCE_MIN = 0.5             # 키포인트 신뢰도 최소값
+
+
+# ============================================================================
 # 📁 VIDEO I/O (입출력 파일 경로)
 # ============================================================================
 
@@ -59,7 +115,7 @@ OUTPUT_QUALITY = 100     # 0-100 (100 = 최고 화질, 파일 크기 큼)
 # ============================================================================
 
 DETECTION_MODEL_PATH = 'yolo11n.pt'       # YOLO11 Nano (경량, 빠름)
-POSE_MODEL_PATH = 'yolo11n-pose.pt'       # Pose estimation (플레이 종료 감지용)
+POSE_MODEL_PATH = 'yolo11n-pose.pt'       # Pose estimation (플레이 종료 감지 + 자세 인식용)
 
 # Detection confidence thresholds
 # 【왜 0.3인가?】

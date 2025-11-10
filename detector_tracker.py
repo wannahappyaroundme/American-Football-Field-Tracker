@@ -12,9 +12,11 @@ from config import (
     BALL_MAX_SIZE,
     BALL_ASPECT_RATIO_MIN,
     BALL_ASPECT_RATIO_MAX,
-    DETECTION_EVERY_N_FRAMES
+    DETECTION_EVERY_N_FRAMES,
+    ENABLE_POSE_DETECTION
 )
 from jersey_id_manager import JerseyBasedIDManager
+from pose_detector import PoseDetector
 
 
 class DetectorTracker:
@@ -53,6 +55,9 @@ class DetectorTracker:
         # OCR interval (every N frames to avoid overhead)
         self.ocr_interval = 30  # Run OCR every 30 frames (1 second @ 30fps)
 
+        # ⭐ Pose detector for crouched player detection
+        self.pose_detector = PoseDetector() if ENABLE_POSE_DETECTION else None
+
         print(f"Loaded YOLO model from {DETECTION_MODEL_PATH}")
         print(f"⭐ PHASE 3 OPTIMIZATIONS APPLIED:")
         print(f"  • Multi-detection: YOLO on FULL frame (25-30 detections)")
@@ -60,6 +65,7 @@ class DetectorTracker:
         print(f"  • Ball: conf=0.15, size 10-120px, aspect 0.7-2.5 (oval shape)")
         print(f"  • BEV filtering: {'ENABLED (Y: 0-500, expanded)' if view_transformer else 'DISABLED'}")
         print(f"  • CLIP: Team classification ENABLED (100% accuracy)")
+        print(f"  • Pose detection: {'ENABLED (crouched player enhancement)' if ENABLE_POSE_DETECTION else 'DISABLED'}")
         print(f"Status logging every {DETECTION_EVERY_N_FRAMES} frames")
 
     def _create_field_mask(self, frame):
@@ -341,6 +347,18 @@ class DetectorTracker:
                 'class_id': class_id,
                 'confidence': confidence
             })
+
+        # ⭐ POSE DETECTION: Enhance person detections for crouched players
+        if self.pose_detector is not None and len(tracks) > 0:
+            # Separate person tracks for pose processing
+            person_tracks = [t for t in tracks if t['class_id'] == CLASS_ID_PERSON]
+            ball_tracks = [t for t in tracks if t['class_id'] == CLASS_ID_BALL]
+
+            # Apply pose detection to enhance person detections
+            enhanced_person_tracks = self.pose_detector.process_frame(frame, person_tracks)
+
+            # Merge back with ball tracks
+            tracks = enhanced_person_tracks + ball_tracks
 
         # ⭐ PHASE 7: JERSEY-BASED ID MAPPING (근본 해결!)
         # Strategy: Use jersey numbers to assign stable IDs

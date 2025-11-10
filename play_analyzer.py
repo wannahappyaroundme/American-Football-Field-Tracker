@@ -1,5 +1,5 @@
 from scipy.spatial import distance
-from config import CLASS_ID_PERSON, CLASS_ID_BALL, PIXELS_PER_YARD_BEV
+from config import CLASS_ID_PERSON, CLASS_ID_BALL, PIXELS_PER_YARD_BEV, ENABLE_STANCE_DETECTION
 
 
 class PlayAnalyzer:
@@ -33,6 +33,10 @@ class PlayAnalyzer:
 
         # Storage for player crop images (for jersey number recognition)
         self.player_crops = {}  # Dict mapping track_id to list of crop images
+
+        # PRE_SNAP stance verification
+        self.presnap_set_verified = False  # Whether all players are in set position
+        self.presnap_set_count = 0  # Number of consecutive frames with all set
 
         print("PlayAnalyzer initialized in PRE_SNAP state")
 
@@ -131,6 +135,24 @@ class PlayAnalyzer:
 
             # State machine logic
             if self.state == 'PRE_SNAP' and closest_person_id is not None:
+                # ⭐ PRE_SNAP stance verification (optional)
+                # Check if players are in set position before allowing play to start
+                if ENABLE_STANCE_DETECTION:
+                    presnap_status = self._verify_presnap_stance(person_tracks)
+
+                    if presnap_status['all_set']:
+                        self.presnap_set_count += 1
+                        if self.presnap_set_count >= 3:  # Require 3 consecutive frames
+                            self.presnap_set_verified = True
+                            print(f"✓ PRE_SNAP verified: {presnap_status['set_percentage']:.0f}% players in set position")
+                    else:
+                        self.presnap_set_count = 0  # Reset counter
+
+                    # Only allow play to start if verified (or disabled)
+                    if not self.presnap_set_verified and ENABLE_STANCE_DETECTION:
+                        print(f"⚠ Waiting for PRE_SNAP set: {presnap_status['set_percentage']:.0f}% ready")
+                        return  # Don't start play yet
+
                 # Play has started
                 self.state = 'PLAY_ACTIVE'
                 self.play_type = 'RUN'  # Default to RUN (던지지 않으면 모두 RUN)
@@ -406,6 +428,43 @@ class PlayAnalyzer:
             'direction': direction,
             'is_moving': is_moving,
             'distance_moved': float(distance_moved)
+        }
+
+    def _verify_presnap_stance(self, person_tracks):
+        """
+        Verify if players are in set position for PRE_SNAP state.
+
+        Args:
+            person_tracks: List of person track dictionaries with stance info
+
+        Returns:
+            Dictionary with:
+            {
+                'all_set': bool,
+                'set_count': int,
+                'total_count': int,
+                'set_percentage': float
+            }
+        """
+        total_count = 0
+        set_count = 0
+
+        for track in person_tracks:
+            if 'stance' in track:
+                total_count += 1
+                if track['stance']['is_set']:
+                    set_count += 1
+
+        set_percentage = (set_count / total_count * 100) if total_count > 0 else 0
+
+        # Consider "all set" if 80% or more players are in set position
+        all_set = set_percentage >= 80.0
+
+        return {
+            'all_set': all_set,
+            'set_count': set_count,
+            'total_count': total_count,
+            'set_percentage': set_percentage
         }
 
     def get_summary(self):
